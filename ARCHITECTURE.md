@@ -49,32 +49,34 @@ graph TD
 **Role:** Custody, Upfront Fee Splitting, Final Settlement, and authoritative registry for every Game Server.
 
 *   **Server Registry**
-    *   `servers[bytes32 serverId]`: stores `{ controller, buyInUSD, configHash, currentRoundId, roundDurationSeconds, roundGraceSeconds, spawnMultiplier, maxPelletValue }`.
+    *   `servers[bytes32 serverId]`: stores `{ controller, buyInUSD, configHash, currentRoundId, massPerDollar, rakeShareBps, worldShareBps }`.
     *   `addServer(serverId, controller, buyInUSD, config)`: admin-only. Adds/updates an entry so new servers can come online without redeploying contracts.
     *   `removeServer(serverId)`: admin-only. Immediately locks deposits/round actions for that server.
 
 *   **Config Storage:**
-    *   `roundDurationSeconds` / `roundGraceSeconds` live inside each `servers[serverId]` entry so different shards can run different cadences.
-    *   Economy knobs such as `spawnMultiplier`, `maxPelletValue`, or future curve parameters are also scoped per `serverId`.
+    *   Each `servers[serverId]` entry defines economic parameters:
+        *   `massPerDollar`: deterministic conversion between spawned mass and USD for that shard.
+        *   `rakeShareBps` / `worldShareBps`: basis-point splits used to route value to the developer and the shared world pool. Whatever remains becomes the playable spawn budget.
+
 
 *   **Write Interfaces (all scoped by `serverId`):**
     *   `startRound(bytes32 serverId, bytes32 roundId)`: Callable only by the registered controller address. Sets `currentRoundId`, stamps `roundStart`, and emits `RoundStart(serverId, roundId, …)`.
-    *   `deposit(bytes32 serverId, uint256 amount)`: User funds whichever `currentRoundId` is active for that server. Contract emits `Deposit(..., serverId, roundId, txHash, ...)`.
-    *   `endRound(bytes32 serverId, bytes32 roundId, address[] players, uint256[] finalMasses)`: Controller settles the round after the configured duration/grace window.
+    *   `deposit(bytes32 serverId, uint256 amount)`: User funds whichever `currentRoundId` is active for that server. Contract deterministically splits the amount into `{ spawnAmount, worldAmount, rakeAmount }` using the configured shares, and emits `Deposit(player, spawnAmount, worldAmount, rakeAmount, serverId, roundId, txHash, …)`.
+    *   `endRound(bytes32 serverId, bytes32 roundId, address[] players, uint256[] finalMasses)`: Controller settles the round after the configured window.
     *   `claim(bytes32 serverId, bytes32 roundId)`: Player withdraws winnings for a specific round/server pair to prevent cross-shard replay.
 
 *   **Events (Listened to by Ponder):**
     *   `AddedServer(serverId, controller, buyInUSD, configHash)`
     *   `RemovedServer(serverId)`
     *   `RoundStart(serverId, roundId, uint256 buyInUSD)`
-    *   `Deposit(address player, uint256 spawnAmount, bytes32 serverId, bytes32 roundId, bytes32 txHash, ...)`
+    *   `Deposit(address player, uint256 spawnAmount, uint256 worldAmount, uint256 rakeAmount, bytes32 serverId, bytes32 roundId, bytes32 txHash, ...)`
     *   `RoundEnd(serverId, roundId, uint256 totalPayout)`
     *   `Claim(address player, uint256 amount, bytes32 serverId, bytes32 roundId)`
 
 ### 2.2 Ponder Indexer
 **Role:** Validates per-round deposits, tracks solvency, exposes round lifecycle for gating joins.
 
-*   **Ingestion:** Listens to `ServerRegistered`, `RoundStart`, `Deposit`, `RoundEnd`, and `Claim` events emitted by the single `World.sol`, always keyed by `serverId`.
+*   **Ingestion:** Listens to `AddedServer`, `RemovedServer`, `RoundStart`, `Deposit`, `RoundEnd`, and `Claim` events emitted by the single `World.sol`, always keyed by `serverId`.
 *   **Subscriptions:** Streams `RoundStart`/`RoundEnd` notifications (per `serverId`) to the Game Server via WebSocket or Redis pub/sub so each controller can align its countdown with the on-chain source of truth.
 *   **GraphQL API (Consumed by Server/Client):**
     *   `deposit(id: txHash)` / `depositByAddress(serverId, roundId, address)`: Verify that a wallet funded the current server/round, the tx was confirmed, and it has not been consumed.
@@ -83,9 +85,9 @@ graph TD
     *   `playerStats(address)`: Historical wins/losses (optional but handy for UX).
     *   `worldPoolBalance()`: Computed aggregate of `worldShare` from all deposits vs. payouts.
 *   **Data Model**
-    *   `servers` table: `{ serverId (PK), controller, buyInUSD, configHash, roundDurationSeconds, roundGraceSeconds, spawnMultiplier, maxPelletValue, lastHeartbeatBlock }`.
+    *   `servers` table: `{ serverId (PK), controller, buyInUSD, configHash, massPerDollar, rakeShareBps, worldShareBps, lastHeartbeatBlock }`.
     *   `rounds` table: `{ serverId, roundId, status (Pending|Live|Ended|Settled), startBlock, endBlock, totalDeposits, totalPayout, createdAt, updatedAt }`.
-    *   `deposits` table: `{ txHash (PK), serverId, roundId, player, amount, spawnMass, used (bool), blockNumber, timestamp }`.
+    *   `deposits` table: `{ txHash (PK), serverId, roundId, player, amount, spawnMass, rakeAmount, worldAmount, used (bool), blockNumber, timestamp }`.
     *   `claims` table: `{ claimTxHash (PK), serverId, roundId, player, amount, status, blockNumber }`.
     *   Aggregates cached in Redis: `{ worldPoolBalance, outstandingClaims }` to answer solvency queries quickly.
 
@@ -98,7 +100,7 @@ graph TD
 *   **Internal Logic:**
     *   `static async onAuth(token, options, context)`: Uses the Privy verification key to validate the bearer token provided by the client (`context.token`) before the room spins up; rejects immediately on invalid/expired tokens.
     *   `onJoin(client, options, auth)`: Called only after `onAuth` succeeds; validates `{ serverId, txHash, roundId, wallet }` via Ponder to ensure the user deposited for the active round on this shard and that the deposit hasn’t been consumed. `auth` contains the verified Privy claims for identity binding.
-    *   `roundClock`: Subscribes to Ponder `RoundStart(serverId, roundId)` events, reads the per-server `roundDurationSeconds` from the contract config, computes `roundEndsAt`, and closes the lobby until the start event is seen. When the countdown elapses (plus `roundGraceSeconds`), it invokes `endRound()`.
+    *   `roundClock`: Subscribes to Ponder `RoundStart(serverId, roundId)` events, records the on-chain `roundStart` timestamp, and uses the locally configured `roundDurationMs`/`roundGraceMs` (shipped with the server binary or directory metadata) to compute `roundEndsAt`. Until that start event is seen, matchmaking stays locked; once the timer elapses it triggers `endRound()`.
     *   `update()`: Runs physics loop (20-60Hz).
     *   `endRound()`: Calculates final mass and submits to Contract with its assigned `serverId`.
     *   `startRoundLoop()`: After `RoundEnd(serverId, roundId)` is observed via Ponder, waits for settlement finality, computes the next `roundId`, calls `startRound(serverId, roundId)` on the contract, and only re-opens matchmaking once Ponder echoes the fresh `RoundStart`.
@@ -132,7 +134,7 @@ graph TD
 **Role:** Provide the homepage with real-time knowledge of every Colyseus server, its buy-in tier, round status, and entry contract.
 
 *   **Metadata Contract**
-    *   All servers share a single `World.sol` deployment. The Directory mirrors the on-chain registry (`ServerRegistered` events) into `{ serverId, controller, buyInUSD, configHash, rpcUrl }`.
+    *   All servers share a single `World.sol` deployment. The Directory mirrors the on-chain registry (`AddedServer`/`RemovedServer` events) into `{ serverId, controller, buyInUSD, configHash, rpcUrl }`.
 *   **Colyseus Hooks**
     *   Every room definition uses `gameServer.define("agar_world", GameRoom, { buyInUSD })` plus `.filterBy(['buyInUSD', 'maxClients'])`, `.sortBy({ clients: 1 })`, and `.enableRealtimeListing()` so that Lobby consumers can subscribe to status changes ([Colyseus Server docs](https://docs.colyseus.io/server)).
     *   Presence/Driver backends (Redis) keep the directory coherent across horizontally scaled processes; `RedisPresence` enables cross-process room discovery while a custom driver persists room metadata for API reads.
@@ -155,7 +157,7 @@ graph TD
     *   Horizontal scaling is done by bringing up more machines, but the presence schema doesn’t care—rooms from different machines share the same namespace while still exposing their `machineId` for observability.
     *   If we ever need multiple rooms of the same buy-in on one machine (for load shedding), they simply register unique `roomId`s; the homepage still treats them as separate worlds because buyers choose the exact server they’ll join.
 *   **Persistent Directory Store**
-    *   `servers` table in Postgres mirrors on-chain + presence data: `{ serverId (PK), controller, region, buyInUSD, status, currentRoundId, roundEndsAt, avgPing, playersOnline, availableSlots, wsEndpoint, rpcUrl, lastPresenceAt }`.
+    *   `servers` table in Postgres mirrors on-chain + presence data: `{ serverId (PK), controller, region, buyInUSD, massPerDollar, rakeShareBps, worldShareBps, status, currentRoundId, roundEndsAt, avgPing, playersOnline, availableSlots, wsEndpoint, rpcUrl, lastPresenceAt }`.
     *   `metrics` table: `{ serverId, cpu, mem, tickRate, updatedAt }` derived from health probes.
     *   Cached JSON response of `GET /servers` stored in Redis (`directory:servers`) so clients can fetch quickly; invalidated whenever presence updates or on-chain registry events arrive.
 
@@ -206,8 +208,8 @@ sequenceDiagram
 
     Note over User, Contract: 2. Financial Commitment
     User->>Contract: deposit(10 USDC)
-    Contract->>Contract: Split Fees (Rake/World)
-    Contract->>Ponder: Emit Deposit(user, netAmount, serverId, roundId, txHash)
+    Contract->>Contract: Split amount using per-server shares → `{ spawnMass, worldAmount, rakeAmount }`
+    Contract->>Ponder: Emit Deposit(user, spawnMass, worldAmount, rakeAmount, serverId, roundId, txHash)
     Ponder->>Ponder: Index Event -> DB
 
     Note over User, Server: 3. Game Entry
@@ -267,6 +269,8 @@ graph TD
     TotalDeposits -->|Budget Query| VirtualPool
     VirtualPool -->|Cap Limit| ActivePellets
 ```
+
+`massPerDollar` from the contract registry ensures every deposit’s `spawnMass` matches the physics economy. The indexer captures that value straight from the `Deposit` event, so the Virtual Pool can be reconciled against on-chain truth at any time.
 
 ### 3.4 Homepage Session & Play CTA
 This diagram captures the full client-side decision tree from landing to spawning.
@@ -368,8 +372,8 @@ sequenceDiagram
 
     GameServer->>Contract: startRound(serverId, nextRoundId)
     Contract->>Ponder: Emit RoundStart(serverId, nextRoundId, startTime)
-    Ponder-->>GameServer: RoundStart(serverId, nextRoundId, startTime, roundDurationSeconds)
-    GameServer->>GameServer: compute roundEndsAt = startTime + roundDurationSeconds + roundGraceSeconds
+    Ponder-->>GameServer: RoundStart(serverId, nextRoundId, startTime)
+    GameServer->>GameServer: compute roundEndsAt = startTime + localRoundDurationMs + roundGraceMs
     GameServer->>Directory: update status(serverId) = "Live", allow joins
     GameServer->>GameServer: wait until roundEndsAt
     GameServer->>Contract: endRound(serverId, currentRoundId, players[], masses[])
