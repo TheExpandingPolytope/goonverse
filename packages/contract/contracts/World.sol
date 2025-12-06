@@ -2,148 +2,247 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
-contract WorldContract is Ownable {
-    struct WorldParams {
-        uint256 baseBuyIn;      // e.g. 5e6 (example: 5 USDC)
-        uint256 massPerDollar;  // e.g. 100e6 (example: 1 USDC = 100 Mass)
-        uint256 rakeShare;        // e.g. 0.025e6 (example: 2.5%)
-        uint256 worldShare;       // e.g. 0.025e6 (example: 2.5%)
+contract World is Ownable, ReentrancyGuard {
+    using MessageHashUtils for bytes32;
+
+    uint256 private constant BPS = 10_000; // 100% = 10_000 bps
+
+    struct ServerConfig {
+        address controller;
+        uint96 buyInAmount;
+        uint32 massPerDollar;
+        uint16 rakeShareBps;
+        uint16 worldShareBps;
+        uint32 exitHoldMs;
     }
 
-    /// @notice Tokens and addresses
-    IERC20 public usdc;
-    address public treasury;
-    address public server;
+    struct ServerState {
+        ServerConfig config;
+        uint256 bankroll; // spawn liquidity held in contract
+        bool exists;
+    }
 
-    WorldParams public world;
+    IERC20 public immutable asset; // e.g. USDC
+    address public rakeRecipient;
+    address public worldRecipient;
 
-    // Claimable balance per player
-    mapping(address => uint256) public claimable;
-    uint256 public totalPendingClaims;
+    // serverId => ServerState
+    mapping(bytes32 => ServerState) private servers;
 
-    /// @notice Events for game functions
-    event Deposit(address indexed player, uint256 spawnAmount, uint256 rakeAmount, uint256 worldAmount);
-    event Round(bytes32 indexed roundId, uint256 totalPayoutUSDC);
-    event Claim(address indexed player, uint256 amount);
+    // serverId => sessionId => consumed
+    mapping(bytes32 => mapping(bytes32 => bool)) public exitedSessions;
 
-    /// @notice Events for admin functions
-    event ServerUpdated(address newServer);
-    event TreasuryUpdated(address newTreasury);
-    event WorldUpdated(uint256 baseBuyIn, uint256 massPerDollar, uint256 rakeShare, uint256 worldShare);
+    uint256 public depositNonce;
+
+    event RakeRecipientUpdated(address indexed recipient);
+    event WorldRecipientUpdated(address indexed recipient);
+
+    event AddedServer(
+        bytes32 indexed serverId,
+        address indexed controller,
+        uint96 buyInAmount,
+        uint32 massPerDollar,
+        uint16 rakeShareBps,
+        uint16 worldShareBps,
+        uint32 exitHoldMs
+    );
+
+    event UpdatedServer(
+        bytes32 indexed serverId,
+        address indexed controller,
+        uint96 buyInAmount,
+        uint32 massPerDollar,
+        uint16 rakeShareBps,
+        uint16 worldShareBps,
+        uint32 exitHoldMs
+    );
+
+    event RemovedServer(bytes32 indexed serverId);
+
+    event Deposit(
+        address indexed player,
+        bytes32 indexed serverId,
+        bytes32 indexed depositId,
+        uint256 amount,
+        uint256 spawnAmount,
+        uint256 worldAmount,
+        uint256 rakeAmount
+    );
+
+    event Exit(
+        address indexed player,
+        bytes32 indexed serverId,
+        bytes32 indexed sessionId,
+        uint256 payout
+    );
 
     constructor(
-        address _usdc,
-        address _treasury,
-        address _server,
-        WorldParams memory _world
+        IERC20 _asset,
+        address _rakeRecipient,
+        address _worldRecipient
     ) Ownable(msg.sender) {
-        usdc = IERC20(_usdc);
-        treasury = _treasury;
-        server = _server;
-        world = _world;
+        require(address(_asset) != address(0), "asset=0");
+        asset = _asset;
+        _updateRakeRecipient(_rakeRecipient);
+        _updateWorldRecipient(_worldRecipient);
     }
 
-    modifier onlyServer() {
-        require(msg.sender == server, "Caller is not the server");
-        _;
+    // --- Admin ---
+
+    function addServer(bytes32 serverId, ServerConfig calldata config) external onlyOwner {
+        require(serverId != bytes32(0), "serverId=0");
+        require(!servers[serverId].exists, "server exists");
+        _validateConfig(config);
+
+        servers[serverId] = ServerState({config: config, bankroll: 0, exists: true});
+
+        emit AddedServer(
+            serverId,
+            config.controller,
+            config.buyInAmount,
+            config.massPerDollar,
+            config.rakeShareBps,
+            config.worldShareBps,
+            config.exitHoldMs
+        );
     }
 
-    /// @notice User deposits USDC to join the game.
-    /// @param amount Must match the baseBuyIn (or we can allow multiples, but spec implies fixed buy-in).
-    function deposit(uint256 amount) external {
-        require(amount == world.baseBuyIn, "Incorrect buy-in amount");
-        
-        // Transfer USDC from user to contract
-        // Requires user to have approved this contract
-        bool success = usdc.transferFrom(msg.sender, address(this), amount);
-        require(success, "Transfer failed");
+    function updateServer(bytes32 serverId, ServerConfig calldata config) external onlyOwner {
+        ServerState storage state = servers[serverId];
+        require(state.exists, "server missing");
+        _validateConfig(config);
 
-        // Calculate splits
-        // Shares are in 1e6 precision (e.g., 2.5% = 0.025e6 = 25,000; 100% = 1e6)
-        uint256 rakeAmount = (amount * world.rakeShare) / 1e6;
-        uint256 worldAmount = (amount * world.worldShare) / 1e6;
+        state.config = config;
+
+        emit UpdatedServer(
+            serverId,
+            config.controller,
+            config.buyInAmount,
+            config.massPerDollar,
+            config.rakeShareBps,
+            config.worldShareBps,
+            config.exitHoldMs
+        );
+    }
+
+    function removeServer(bytes32 serverId) external onlyOwner {
+        ServerState storage state = servers[serverId];
+        require(state.exists, "server missing");
+        require(state.bankroll == 0, "bankroll not empty");
+        delete servers[serverId];
+        emit RemovedServer(serverId);
+    }
+
+    function setRakeRecipient(address recipient) external onlyOwner {
+        _updateRakeRecipient(recipient);
+    }
+
+    function setWorldRecipient(address recipient) external onlyOwner {
+        _updateWorldRecipient(recipient);
+    }
+
+    function sweep(IERC20 token, address to, uint256 amount) external onlyOwner {
+        require(to != address(0), "to=0");
+        require(token.transfer(to, amount), "transfer fail");
+    }
+
+    // --- Gameplay ---
+
+    function deposit(bytes32 serverId, uint256 amount) external nonReentrant {
+        ServerState storage state = servers[serverId];
+        require(state.exists, "server missing");
+        require(amount == state.config.buyInAmount, "invalid buy-in");
+
+        require(asset.transferFrom(msg.sender, address(this), amount), "transferFrom fail");
+
+        uint256 rakeAmount = (amount * state.config.rakeShareBps) / BPS;
+        uint256 worldAmount = (amount * state.config.worldShareBps) / BPS;
+        require(rakeAmount + worldAmount < amount, "fees too high");
         uint256 spawnAmount = amount - rakeAmount - worldAmount;
 
-        // Send rake immediately
         if (rakeAmount > 0) {
-            require(usdc.transfer(treasury, rakeAmount), "Rake transfer failed");
+            require(rakeRecipient != address(0), "rake recipient unset");
+            require(asset.transfer(rakeRecipient, rakeAmount), "rake transfer fail");
         }
 
-        // Emit event for server to spawn
-        // worldAmount and spawnAmount stay in the contract
-        emit Deposit(msg.sender, spawnAmount, rakeAmount, worldAmount);
-    }
-
-    /// @notice Server commits the results of a round.
-    /// @param roundId Unique ID for the round.
-    /// @param players List of players involved.
-    /// @param finalMasses List of final mass for each player.
-    function endRound(
-        bytes32 roundId,
-        address[] calldata players,
-        uint256[] calldata finalMasses
-    ) external onlyServer {
-        require(players.length == finalMasses.length, "Mismatched arrays");
-
-        uint256 totalPayoutUSDC = 0;
-
-        for (uint256 i = 0; i < players.length; i++) {
-            // Conversion:
-            // Payout = (Mass * 1e6) / MPD
-            // This assumes MPD is "Mass per 1 full USDC"
-            // Example: Mass=100, MPD=100 => Payout = 100*1e6/100 = 1e6 (1 USDC)
-            uint256 payout = (finalMasses[i] * 1e6) / world.massPerDollar;
-            
-            if (payout > 0) {
-                claimable[players[i]] += payout;
-                totalPayoutUSDC += payout;
-            }
+        if (worldAmount > 0) {
+            require(worldRecipient != address(0), "world recipient unset");
+            require(asset.transfer(worldRecipient, worldAmount), "world transfer fail");
         }
 
-        // Global Solvency Check
-        // Contract must hold enough for ALL pending claims (old + new)
-        totalPendingClaims += totalPayoutUSDC;
-        require(usdc.balanceOf(address(this)) >= totalPendingClaims, "Insolvent: Not enough funds");
+        state.bankroll += spawnAmount;
 
-        emit Round(roundId, totalPayoutUSDC);
+        bytes32 depositId = keccak256(abi.encodePacked(serverId, msg.sender, ++depositNonce));
+        emit Deposit(msg.sender, serverId, depositId, amount, spawnAmount, worldAmount, rakeAmount);
     }
 
-    /// @notice Users claim their winnings.
-    function claim() external {
-        uint256 amount = claimable[msg.sender];
-        require(amount > 0, "Nothing to claim");
+    function exitWithSignature(
+        bytes32 serverId,
+        bytes32 sessionId,
+        uint256 payout,
+        uint256 deadline,
+        bytes calldata signature
+    ) external nonReentrant {
+        ServerState storage state = servers[serverId];
+        require(state.exists, "server missing");
+        require(block.timestamp <= deadline, "ticket expired");
+        require(!exitedSessions[serverId][sessionId], "session claimed");
+        require(payout > 0, "payout=0");
+        require(payout <= state.bankroll, "insufficient bankroll");
 
-        claimable[msg.sender] = 0;
-        totalPendingClaims -= amount;
-        
-        require(usdc.transfer(msg.sender, amount), "Transfer failed");
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                address(this),
+                serverId,
+                sessionId,
+                msg.sender,
+                payout,
+                deadline
+            )
+        ).toEthSignedMessageHash();
 
-        emit Claim(msg.sender, amount);
+        address signer = ECDSA.recover(digest, signature);
+        require(signer == state.config.controller, "bad signature");
+
+        exitedSessions[serverId][sessionId] = true;
+        state.bankroll -= payout;
+
+        require(asset.transfer(msg.sender, payout), "transfer fail");
+
+        emit Exit(msg.sender, serverId, sessionId, payout);
     }
 
-    // -- Admin --
+    // --- Views ---
 
-    /// @notice Sets the server address.
-    /// @param _server The new server address.
-    function setServer(address _server) external onlyOwner {
-        server = _server;
-        emit ServerUpdated(_server);
+    function getServer(bytes32 serverId) external view returns (ServerConfig memory config, uint256 bankroll) {
+        ServerState storage state = servers[serverId];
+        require(state.exists, "server missing");
+        return (state.config, state.bankroll);
     }
 
-    /// @notice Sets the treasury address.
-    /// @param _treasury The new treasury address.
-    function setTreasury(address _treasury) external onlyOwner {
-        treasury = _treasury;
-        emit TreasuryUpdated(_treasury);
+    // --- Internal helpers ---
+
+    function _validateConfig(ServerConfig calldata config) private pure {
+        require(config.controller != address(0), "controller=0");
+        require(config.buyInAmount > 0, "buyIn=0");
+        require(config.massPerDollar > 0, "MPD=0");
+        require(config.rakeShareBps + config.worldShareBps < BPS, "fees >= 100%" );
     }
 
-    /// @notice Sets the world parameters.
-    /// @param _world The new world parameters.
-    function setWorldParams(WorldParams memory _world) external onlyOwner {
-        world = _world;
-        emit WorldUpdated(_world.baseBuyIn, _world.massPerDollar, _world.rakeShare, _world.worldShare);
+    function _updateRakeRecipient(address recipient) private {
+        require(recipient != address(0), "rake recipient=0");
+        rakeRecipient = recipient;
+        emit RakeRecipientUpdated(recipient);
+    }
+
+    function _updateWorldRecipient(address recipient) private {
+        require(recipient != address(0), "world recipient=0");
+        worldRecipient = recipient;
+        emit WorldRecipientUpdated(recipient);
     }
 }
-
