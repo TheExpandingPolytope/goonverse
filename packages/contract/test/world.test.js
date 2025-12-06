@@ -413,6 +413,111 @@ describe("World", function () {
     });
   });
 
+  describe("Admin", function () {
+    describe("setRakeRecipient", function () {
+      it("emits RakeRecipientUpdated event", async function () {
+        const { world, alice } = await loadFixture(deployWorldFixture);
+        await expect(world.setRakeRecipient(alice.address))
+          .to.emit(world, "RakeRecipientUpdated")
+          .withArgs(alice.address);
+      });
+
+      it("updates rakeRecipient address", async function () {
+        const { world, alice } = await loadFixture(deployWorldFixture);
+        await world.setRakeRecipient(alice.address);
+        expect(await world.rakeRecipient()).to.equal(alice.address);
+      });
+
+      it("reverts with zero address", async function () {
+        const { world } = await loadFixture(deployWorldFixture);
+        await expect(world.setRakeRecipient(ethers.ZeroAddress)).to.be.revertedWith("rake recipient=0");
+      });
+
+      it("reverts for non-owner", async function () {
+        const { world, alice, bob } = await loadFixture(deployWorldFixture);
+        await expect(world.connect(alice).setRakeRecipient(bob.address)).to.be.revertedWithCustomError(
+          world,
+          "OwnableUnauthorizedAccount"
+        );
+      });
+    });
+
+    describe("setWorldRecipient", function () {
+      it("emits WorldRecipientUpdated event", async function () {
+        const { world, alice } = await loadFixture(deployWorldFixture);
+        await expect(world.setWorldRecipient(alice.address))
+          .to.emit(world, "WorldRecipientUpdated")
+          .withArgs(alice.address);
+      });
+
+      it("updates worldRecipient address", async function () {
+        const { world, alice } = await loadFixture(deployWorldFixture);
+        await world.setWorldRecipient(alice.address);
+        expect(await world.worldRecipient()).to.equal(alice.address);
+      });
+
+      it("reverts with zero address", async function () {
+        const { world } = await loadFixture(deployWorldFixture);
+        await expect(world.setWorldRecipient(ethers.ZeroAddress)).to.be.revertedWith("world recipient=0");
+      });
+
+      it("reverts for non-owner", async function () {
+        const { world, alice, bob } = await loadFixture(deployWorldFixture);
+        await expect(world.connect(alice).setWorldRecipient(bob.address)).to.be.revertedWithCustomError(
+          world,
+          "OwnableUnauthorizedAccount"
+        );
+      });
+    });
+
+    describe("sweep", function () {
+      it("transfers tokens to recipient", async function () {
+        const { world, token, owner, alice } = await loadFixture(deployWorldFixture);
+        const sweepAmount = ethers.parseUnits("100", 18);
+
+        // Send tokens to the contract
+        await token.transfer(await world.getAddress(), sweepAmount);
+
+        const aliceBalanceBefore = await token.balanceOf(alice.address);
+        await world.sweep(await token.getAddress(), alice.address, sweepAmount);
+        const aliceBalanceAfter = await token.balanceOf(alice.address);
+
+        expect(aliceBalanceAfter - aliceBalanceBefore).to.equal(sweepAmount);
+      });
+
+      it("can sweep non-asset tokens", async function () {
+        const { world, owner, alice } = await loadFixture(deployWorldFixture);
+
+        // Deploy another token
+        const MockERC20 = await ethers.getContractFactory("MockERC20");
+        const otherToken = await MockERC20.deploy(owner.address, ethers.parseUnits("1000", 18));
+        const sweepAmount = ethers.parseUnits("50", 18);
+
+        // Send other token to the contract
+        await otherToken.transfer(await world.getAddress(), sweepAmount);
+
+        const aliceBalanceBefore = await otherToken.balanceOf(alice.address);
+        await world.sweep(await otherToken.getAddress(), alice.address, sweepAmount);
+        const aliceBalanceAfter = await otherToken.balanceOf(alice.address);
+
+        expect(aliceBalanceAfter - aliceBalanceBefore).to.equal(sweepAmount);
+      });
+
+      it("reverts with zero recipient", async function () {
+        const { world, token } = await loadFixture(deployWorldFixture);
+        await expect(world.sweep(await token.getAddress(), ethers.ZeroAddress, 100n)).to.be.revertedWith("to=0");
+      });
+
+      it("reverts for non-owner", async function () {
+        const { world, token, alice, bob } = await loadFixture(deployWorldFixture);
+        await expect(world.connect(alice).sweep(await token.getAddress(), bob.address, 100n)).to.be.revertedWithCustomError(
+          world,
+          "OwnableUnauthorizedAccount"
+        );
+      });
+    });
+  });
+
   describe("Deposits", function () {
     describe("deposit", function () {
       it("emits Deposit event with correct args", async function () {
