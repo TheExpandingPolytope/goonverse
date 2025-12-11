@@ -6,20 +6,24 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/rooms/systems/__tests__/BalanceSystem.test.ts"
   },
   "dependencies": {
+    "@colyseus/redis-driver": "^0.16.0",
     "@colyseus/redis-presence": "^0.16.0",
     "@colyseus/tools": "^0.16.0",
     "@privy-io/server-auth": "^1.17.0",
     "colyseus": "^0.16.0",
     "cors": "^2.8.5",
     "express": "^4.21.0",
+    "ioredis": "^5.8.2",
     "viem": "^2.21.3"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
+    "@types/ioredis": "^4.28.10",
     "@types/node": "^20.10.0",
     "tsx": "^4.19.0",
     "typescript": "^5.3.2"
@@ -28,4 +32,3 @@
     "node": ">=18.14"
   }
 }
-

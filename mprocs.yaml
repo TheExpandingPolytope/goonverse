@@ -1,0 +1,109 @@
+procs:
+  # Infrastructure Services
+  postgres:
+    cmd:
+      - docker
+      - run
+      - --rm
+      - --name
+      - goonverse-postgres
+      - -e
+      - POSTGRES_USER=ponder
+      - -e
+      - POSTGRES_PASSWORD=ponder
+      - -e
+      - POSTGRES_DB=ponder
+      - -p
+      - "5432:5432"
+      - postgres:16-alpine
+    stop: SIGTERM
+
+  redis:
+    cmd:
+      - docker
+      - run
+      - --rm
+      - --name
+      - goonverse-redis
+      - -p
+      - "6379:6379"
+      - redis:7-alpine
+    stop: SIGTERM
+
+  # Redis UI (RedisInsight) for inspecting Redis state
+  redisinsight:
+    cmd:
+      - docker
+      - run
+      - --rm
+      - --name
+      - goonverse-redisinsight
+      - -p
+      - "5540:5540"
+      - --add-host
+      - host.docker.internal:host-gateway
+      - redis/redisinsight:latest
+    stop: SIGTERM
+
+  # Local blockchain for development
+  hardhat:
+    cwd: packages/contract
+    cmd:
+      - npx
+      - hardhat
+      - node
+    stop: SIGTERM
+
+  # Deploy contracts locally
+  deploy:
+    cwd: packages/contract
+    cmd:
+      - /bin/bash
+      - -c
+      - "until curl -s http://localhost:8545 > /dev/null; do sleep 1; done; npx hardhat ignition deploy ignition/modules/World.js --network localhost"
+    stop: SIGTERM
+
+  # Ponder Indexer (depends on postgres, redis, hardhat)
+  ponder:
+    cwd: packages/indexer
+    cmd:
+      - npm
+      - run
+      - dev
+    env:
+      DATABASE_URL: "postgresql://ponder:ponder@localhost:5432/ponder"
+      REDIS_URL: "redis://localhost:6379"
+    stop: SIGTERM
+
+  # Game Server (depends on redis, ponder)
+  # Exposes /rooms endpoint for room discovery across all machines via RedisDriver
+  server:
+    cwd: packages/server
+    cmd:
+      - npm
+      - run
+      - dev
+    env:
+      PORT: "2567"
+      REDIS_URI: "redis://localhost:6379"
+      PONDER_URL: "http://localhost:42069"
+      # These need to be set in packages/server/.env
+      # PRIVY_APP_ID: ""
+      # PRIVY_APP_SECRET: ""
+      # SERVER_ID: ""
+      # CONTROLLER_PRIVATE_KEY: ""
+      # WORLD_CONTRACT_ADDRESS: ""
+    stop: SIGTERM
+
+  # Client (placeholder - depends on server)
+  # Calls game server directly for /rooms and /ping
+  client:
+    cwd: packages/client
+    cmd:
+      - npm
+      - run
+      - dev
+    env:
+      VITE_GAME_SERVER_URL: "http://localhost:2567"
+      VITE_WS_ENDPOINT: "ws://localhost:2567"
+    stop: SIGTERM

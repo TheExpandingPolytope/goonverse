@@ -13,8 +13,8 @@ export const servers = onchainTable(
     controller: t.hex().notNull(),
     // Buy-in amount in asset tokens (e.g., USDC with 6 decimals)
     buyInAmount: t.bigint().notNull(),
-    // Mass per dollar conversion rate
-    massPerDollar: t.integer().notNull(),
+    // Mass per ETH conversion rate
+    massPerEth: t.integer().notNull(),
     // Rake share in basis points (10000 = 100%)
     rakeShareBps: t.integer().notNull(),
     // World pool share in basis points

@@ -51,7 +51,7 @@ export function getControllerAddress(): `0x${string}` {
  * 
  * @param sessionId - Unique session identifier
  * @param player - Player's wallet address
- * @param payout - Payout amount in asset tokens (e.g., USDC with 6 decimals)
+ * @param payout - Payout amount in asset tokens (e.g., native ETH in wei, 18 decimals)
  * @param deadlineSeconds - Seconds from now until ticket expires (default: 24h)
  * @returns The signed exit ticket
  */
@@ -114,17 +114,17 @@ export function generateSessionId(
  * Convert mass to payout amount
  * 
  * @param mass - Player's final mass
- * @param massPerDollar - Mass per dollar rate from server config
- * @param decimals - Asset token decimals (default: 6 for USDC)
+ * @param massPerEth - Mass per ETH rate from server config
+ * @param decimals - Asset token decimals (default: 18 for ETH/wei)
  * @returns Payout in asset tokens
  */
 export function massToPayoutAmount(
   mass: number,
-  massPerDollar: number,
-  decimals: number = 6
+  massPerEth: number,
+  decimals: number = 18
 ): bigint {
-  // payout = mass / massPerDollar * 10^decimals
-  const payoutUsd = mass / massPerDollar;
+  // payout = mass / massPerEth * 10^decimals
+  const payoutUsd = mass / massPerEth;
   return BigInt(Math.floor(payoutUsd * 10 ** decimals));
 }
 
@@ -132,18 +132,18 @@ export function massToPayoutAmount(
  * Convert payout amount to mass
  * 
  * @param payout - Payout in asset tokens
- * @param massPerDollar - Mass per dollar rate from server config
- * @param decimals - Asset token decimals (default: 6 for USDC)
+ * @param massPerEth - Mass per ETH rate from server config
+ * @param decimals - Asset token decimals (default: 18 for ETH/wei)
  * @returns Equivalent mass
  */
 export function payoutAmountToMass(
   payout: bigint,
-  massPerDollar: number,
-  decimals: number = 6
+  massPerEth: number,
+  decimals: number = 18
 ): number {
-  // mass = payout / 10^decimals * massPerDollar
+  // mass = payout / 10^decimals * massPerEth
   const payoutUsd = Number(payout) / 10 ** decimals;
-  return payoutUsd * massPerDollar;
+  return payoutUsd * massPerEth;
 }
 
 /**

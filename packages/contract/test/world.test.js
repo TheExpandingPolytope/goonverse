@@ -14,13 +14,13 @@ async function deployWorldFixture() {
   const token = await MockERC20.deploy(owner.address, initialSupply);
 
   const World = await ethers.getContractFactory("World");
-  const world = await World.deploy(await token.getAddress(), owner.address, owner.address);
+  const world = await World.deploy(owner.address, owner.address);
 
   const serverId = ethers.id("SERVER_A");
   const config = {
     controller: controller.address,
     buyInAmount: ethers.parseUnits("100", 18),
-    massPerDollar: 1_000,
+    massPerEth: 1_000,
     rakeShareBps: 250,
     worldShareBps: 250,
     exitHoldMs: 12_000,
@@ -68,7 +68,7 @@ describe("World", function () {
         const newConfig = {
           controller: controller.address,
           buyInAmount: ethers.parseUnits("50", 18),
-          massPerDollar: 500,
+          massPerEth: 500,
           rakeShareBps: 100,
           worldShareBps: 100,
           exitHoldMs: 5_000,
@@ -80,7 +80,7 @@ describe("World", function () {
             newServerId,
             newConfig.controller,
             newConfig.buyInAmount,
-            newConfig.massPerDollar,
+            newConfig.massPerEth,
             newConfig.rakeShareBps,
             newConfig.worldShareBps,
             newConfig.exitHoldMs
@@ -93,7 +93,7 @@ describe("World", function () {
         const newConfig = {
           controller: controller.address,
           buyInAmount: ethers.parseUnits("200", 18),
-          massPerDollar: 2_000,
+          massPerEth: 2_000,
           rakeShareBps: 300,
           worldShareBps: 200,
           exitHoldMs: 10_000,
@@ -104,7 +104,7 @@ describe("World", function () {
         const [storedConfig, bankroll] = await world.getServer(newServerId);
         expect(storedConfig.controller).to.equal(newConfig.controller);
         expect(storedConfig.buyInAmount).to.equal(newConfig.buyInAmount);
-        expect(storedConfig.massPerDollar).to.equal(newConfig.massPerDollar);
+        expect(storedConfig.massPerEth).to.equal(newConfig.massPerEth);
         expect(storedConfig.rakeShareBps).to.equal(newConfig.rakeShareBps);
         expect(storedConfig.worldShareBps).to.equal(newConfig.worldShareBps);
         expect(storedConfig.exitHoldMs).to.equal(newConfig.exitHoldMs);
@@ -116,7 +116,7 @@ describe("World", function () {
         const badConfig = {
           controller: controller.address,
           buyInAmount: ethers.parseUnits("100", 18),
-          massPerDollar: 1_000,
+          massPerEth: 1_000,
           rakeShareBps: 250,
           worldShareBps: 250,
           exitHoldMs: 12_000,
@@ -131,7 +131,7 @@ describe("World", function () {
           world.addServer(newServerId, {
             controller: ethers.ZeroAddress,
             buyInAmount: ethers.parseUnits("100", 18),
-            massPerDollar: 1_000,
+            massPerEth: 1_000,
             rakeShareBps: 250,
             worldShareBps: 250,
             exitHoldMs: 12_000,
@@ -146,7 +146,7 @@ describe("World", function () {
           world.addServer(newServerId, {
             controller: controller.address,
             buyInAmount: 0,
-            massPerDollar: 1_000,
+            massPerEth: 1_000,
             rakeShareBps: 250,
             worldShareBps: 250,
             exitHoldMs: 12_000,
@@ -154,14 +154,14 @@ describe("World", function () {
         ).to.be.revertedWith("buyIn=0");
       });
 
-      it("reverts with zero massPerDollar", async function () {
+      it("reverts with zero massPerEth", async function () {
         const { world, controller } = await loadFixture(deployWorldFixture);
         const newServerId = ethers.id("SERVER_BAD_MPD");
         await expect(
           world.addServer(newServerId, {
             controller: controller.address,
             buyInAmount: ethers.parseUnits("100", 18),
-            massPerDollar: 0,
+            massPerEth: 0,
             rakeShareBps: 250,
             worldShareBps: 250,
             exitHoldMs: 12_000,
@@ -176,7 +176,7 @@ describe("World", function () {
           world.addServer(newServerId, {
             controller: controller.address,
             buyInAmount: ethers.parseUnits("100", 18),
-            massPerDollar: 1_000,
+            massPerEth: 1_000,
             rakeShareBps: 5_000,
             worldShareBps: 5_000,
             exitHoldMs: 12_000,
@@ -195,7 +195,7 @@ describe("World", function () {
         const newConfig = {
           controller: controller.address,
           buyInAmount: ethers.parseUnits("100", 18),
-          massPerDollar: 1_000,
+          massPerEth: 1_000,
           rakeShareBps: 250,
           worldShareBps: 250,
           exitHoldMs: 12_000,
@@ -213,7 +213,7 @@ describe("World", function () {
         const newConfig = {
           controller: config.controller,
           buyInAmount: config.buyInAmount * 2n,
-          massPerDollar: 2_000,
+          massPerEth: 2_000,
           rakeShareBps: 500,
           worldShareBps: 300,
           exitHoldMs: 30_000,
@@ -225,7 +225,7 @@ describe("World", function () {
             serverId,
             newConfig.controller,
             newConfig.buyInAmount,
-            newConfig.massPerDollar,
+            newConfig.massPerEth,
             newConfig.rakeShareBps,
             newConfig.worldShareBps,
             newConfig.exitHoldMs
@@ -237,7 +237,7 @@ describe("World", function () {
         const newConfig = {
           controller: alice.address,
           buyInAmount: config.buyInAmount * 3n,
-          massPerDollar: 5_000,
+          massPerEth: 5_000,
           rakeShareBps: 100,
           worldShareBps: 150,
           exitHoldMs: 60_000,
@@ -248,7 +248,7 @@ describe("World", function () {
         const [stored] = await world.getServer(serverId);
         expect(stored.controller).to.equal(newConfig.controller);
         expect(stored.buyInAmount).to.equal(newConfig.buyInAmount);
-        expect(stored.massPerDollar).to.equal(newConfig.massPerDollar);
+        expect(stored.massPerEth).to.equal(newConfig.massPerEth);
         expect(stored.rakeShareBps).to.equal(newConfig.rakeShareBps);
         expect(stored.worldShareBps).to.equal(newConfig.worldShareBps);
         expect(stored.exitHoldMs).to.equal(newConfig.exitHoldMs);
@@ -258,8 +258,7 @@ describe("World", function () {
         const { world, serverId, config, token, alice } = await loadFixture(deployWorldFixture);
 
         // Deposit to create non-zero bankroll
-        await token.connect(alice).approve(await world.getAddress(), config.buyInAmount);
-        await world.connect(alice).deposit(serverId, config.buyInAmount);
+        await world.connect(alice).deposit(serverId, { value: config.buyInAmount });
 
         const [, bankrollBefore] = await world.getServer(serverId);
         expect(bankrollBefore).to.be.greaterThan(0n);
@@ -289,9 +288,9 @@ describe("World", function () {
         await expect(world.updateServer(serverId, badConfig)).to.be.revertedWith("buyIn=0");
       });
 
-      it("reverts with zero massPerDollar", async function () {
+      it("reverts with zero massPerEth", async function () {
         const { world, serverId, config } = await loadFixture(deployWorldFixture);
-        const badConfig = { ...config, massPerDollar: 0 };
+        const badConfig = { ...config, massPerEth: 0 };
         await expect(world.updateServer(serverId, badConfig)).to.be.revertedWith("MPD=0");
       });
 
@@ -338,7 +337,7 @@ describe("World", function () {
             serverId,
             config.controller,
             config.buyInAmount,
-            config.massPerDollar,
+            config.massPerEth,
             config.rakeShareBps,
             config.worldShareBps,
             config.exitHoldMs
@@ -354,8 +353,7 @@ describe("World", function () {
         const { world, serverId, token, config, alice, controller } = await loadFixture(deployWorldFixture);
 
         // Deposit to create bankroll
-        await token.connect(alice).approve(await world.getAddress(), config.buyInAmount);
-        await world.connect(alice).deposit(serverId, config.buyInAmount);
+        await world.connect(alice).deposit(serverId, { value: config.buyInAmount });
 
         const [, bankrollBefore] = await world.getServer(serverId);
         expect(bankrollBefore).to.be.greaterThan(0n);
@@ -388,8 +386,7 @@ describe("World", function () {
 
       it("reverts when bankroll non-zero", async function () {
         const { world, serverId, token, config, alice } = await loadFixture(deployWorldFixture);
-        await token.connect(alice).approve(await world.getAddress(), config.buyInAmount);
-        await world.connect(alice).deposit(serverId, config.buyInAmount);
+        await world.connect(alice).deposit(serverId, { value: config.buyInAmount });
         await expect(world.removeServer(serverId)).to.be.revertedWith("bankroll not empty");
       });
 
@@ -471,46 +468,35 @@ describe("World", function () {
     });
 
     describe("sweep", function () {
-      it("transfers tokens to recipient", async function () {
-        const { world, token, owner, alice } = await loadFixture(deployWorldFixture);
-        const sweepAmount = ethers.parseUnits("100", 18);
+      it("transfers ETH to recipient", async function () {
+        const { world, serverId, config, owner, alice } = await loadFixture(deployWorldFixture);
+        const sweepAmount = ethers.parseUnits("1", 18);
 
-        // Send tokens to the contract
-        await token.transfer(await world.getAddress(), sweepAmount);
+        // Fund contract via a deposit (credits bankroll)
+        await world.connect(alice).deposit(serverId, { value: config.buyInAmount });
 
-        const aliceBalanceBefore = await token.balanceOf(alice.address);
-        await world.sweep(await token.getAddress(), alice.address, sweepAmount);
-        const aliceBalanceAfter = await token.balanceOf(alice.address);
+        const worldAddress = await world.getAddress();
+        const worldBalanceBefore = await ethers.provider.getBalance(worldAddress);
+        const aliceBalanceBefore = await ethers.provider.getBalance(alice.address);
 
-        expect(aliceBalanceAfter - aliceBalanceBefore).to.equal(sweepAmount);
-      });
+        const tx = await world.sweep(alice.address, sweepAmount);
+        await tx.wait();
 
-      it("can sweep non-asset tokens", async function () {
-        const { world, owner, alice } = await loadFixture(deployWorldFixture);
+        const worldBalanceAfter = await ethers.provider.getBalance(worldAddress);
+        const aliceBalanceAfter = await ethers.provider.getBalance(alice.address);
 
-        // Deploy another token
-        const MockERC20 = await ethers.getContractFactory("MockERC20");
-        const otherToken = await MockERC20.deploy(owner.address, ethers.parseUnits("1000", 18));
-        const sweepAmount = ethers.parseUnits("50", 18);
-
-        // Send other token to the contract
-        await otherToken.transfer(await world.getAddress(), sweepAmount);
-
-        const aliceBalanceBefore = await otherToken.balanceOf(alice.address);
-        await world.sweep(await otherToken.getAddress(), alice.address, sweepAmount);
-        const aliceBalanceAfter = await otherToken.balanceOf(alice.address);
-
+        expect(worldBalanceBefore - worldBalanceAfter).to.equal(sweepAmount);
         expect(aliceBalanceAfter - aliceBalanceBefore).to.equal(sweepAmount);
       });
 
       it("reverts with zero recipient", async function () {
-        const { world, token } = await loadFixture(deployWorldFixture);
-        await expect(world.sweep(await token.getAddress(), ethers.ZeroAddress, 100n)).to.be.revertedWith("to=0");
+        const { world } = await loadFixture(deployWorldFixture);
+        await expect(world.sweep(ethers.ZeroAddress, 100n)).to.be.revertedWith("to=0");
       });
 
       it("reverts for non-owner", async function () {
-        const { world, token, alice, bob } = await loadFixture(deployWorldFixture);
-        await expect(world.connect(alice).sweep(await token.getAddress(), bob.address, 100n)).to.be.revertedWithCustomError(
+        const { world, alice, bob } = await loadFixture(deployWorldFixture);
+        await expect(world.connect(alice).sweep(bob.address, 100n)).to.be.revertedWithCustomError(
           world,
           "OwnableUnauthorizedAccount"
         );
@@ -524,71 +510,43 @@ describe("World", function () {
         const { world, token, serverId, config, alice } = await loadFixture(deployWorldFixture);
         const amount = config.buyInAmount;
         const worldAddress = await world.getAddress();
-        await token.connect(alice).approve(worldAddress, amount);
 
         const { spawn, rake, world: worldFee } = calcSplits(amount, config.rakeShareBps, config.worldShareBps);
         const expectedDepositId = ethers.solidityPackedKeccak256(["bytes32", "address", "uint256"], [serverId, alice.address, 1n]);
 
-        await expect(world.connect(alice).deposit(serverId, amount))
+        await expect(world.connect(alice).deposit(serverId, { value: amount }))
           .to.emit(world, "Deposit")
           .withArgs(alice.address, serverId, expectedDepositId, amount, spawn, worldFee, rake);
       });
 
-      it("transfers buy-in from player to contract", async function () {
-        const { world, token, serverId, config, alice } = await loadFixture(deployWorldFixture);
+      it("credits spawn amount to contract balance and pays rake/world to recipient", async function () {
+        const { world, serverId, config, alice, owner } = await loadFixture(deployWorldFixture);
         const amount = config.buyInAmount;
+        const { spawn, rake, world: worldFee } = calcSplits(amount, config.rakeShareBps, config.worldShareBps);
+
         const worldAddress = await world.getAddress();
-        await token.connect(alice).approve(worldAddress, amount);
+        const worldBalanceBefore = await ethers.provider.getBalance(worldAddress);
+        const ownerBalanceBefore = await ethers.provider.getBalance(owner.address);
 
-        const aliceBalanceBefore = await token.balanceOf(alice.address);
-        await world.connect(alice).deposit(serverId, amount);
-        const aliceBalanceAfter = await token.balanceOf(alice.address);
+        const tx = await world.connect(alice).deposit(serverId, { value: amount });
+        await tx.wait();
 
-        expect(aliceBalanceBefore - aliceBalanceAfter).to.equal(amount);
-      });
+        const worldBalanceAfter = await ethers.provider.getBalance(worldAddress);
+        const ownerBalanceAfter = await ethers.provider.getBalance(owner.address);
 
-      it("sends rake to rakeRecipient", async function () {
-        const { world, token, serverId, config, alice, owner } = await loadFixture(deployWorldFixture);
-        const amount = config.buyInAmount;
-        const worldAddress = await world.getAddress();
-        await token.connect(alice).approve(worldAddress, amount);
-
-        const { rake } = calcSplits(amount, config.rakeShareBps, config.worldShareBps);
-        const rakeRecipientBefore = await token.balanceOf(owner.address);
-
-        await world.connect(alice).deposit(serverId, amount);
-
-        const rakeRecipientAfter = await token.balanceOf(owner.address);
-        // Owner is both rake and world recipient, so receives both
-        expect(rakeRecipientAfter - rakeRecipientBefore).to.be.greaterThanOrEqual(rake);
-      });
-
-      it("sends worldFee to worldRecipient", async function () {
-        const { world, token, serverId, config, alice, owner } = await loadFixture(deployWorldFixture);
-        const amount = config.buyInAmount;
-        const worldAddress = await world.getAddress();
-        await token.connect(alice).approve(worldAddress, amount);
-
-        const { rake, world: worldFee } = calcSplits(amount, config.rakeShareBps, config.worldShareBps);
-        const worldRecipientBefore = await token.balanceOf(owner.address);
-
-        await world.connect(alice).deposit(serverId, amount);
-
-        const worldRecipientAfter = await token.balanceOf(owner.address);
-        // Owner is both rake and world recipient
-        expect(worldRecipientAfter - worldRecipientBefore).to.equal(rake + worldFee);
+        expect(worldBalanceAfter - worldBalanceBefore).to.equal(spawn);
+        expect(ownerBalanceAfter - ownerBalanceBefore).to.equal(rake + worldFee);
       });
 
       it("credits spawn amount to bankroll", async function () {
         const { world, token, serverId, config, alice } = await loadFixture(deployWorldFixture);
         const amount = config.buyInAmount;
         const worldAddress = await world.getAddress();
-        await token.connect(alice).approve(worldAddress, amount);
 
         const { spawn } = calcSplits(amount, config.rakeShareBps, config.worldShareBps);
 
         const [, bankrollBefore] = await world.getServer(serverId);
-        await world.connect(alice).deposit(serverId, amount);
+        await world.connect(alice).deposit(serverId, { value: amount });
         const [, bankrollAfter] = await world.getServer(serverId);
 
         expect(bankrollAfter - bankrollBefore).to.equal(spawn);
@@ -601,17 +559,16 @@ describe("World", function () {
         const { spawn, rake, world: worldFee } = calcSplits(amount, config.rakeShareBps, config.worldShareBps);
 
         // First deposit
-        await token.connect(alice).approve(worldAddress, amount * 2n);
         const expectedDepositId1 = ethers.solidityPackedKeccak256(["bytes32", "address", "uint256"], [serverId, alice.address, 1n]);
 
-        await expect(world.connect(alice).deposit(serverId, amount))
+        await expect(world.connect(alice).deposit(serverId, { value: amount }))
           .to.emit(world, "Deposit")
           .withArgs(alice.address, serverId, expectedDepositId1, amount, spawn, worldFee, rake);
 
         // Second deposit - nonce should increment
         const expectedDepositId2 = ethers.solidityPackedKeccak256(["bytes32", "address", "uint256"], [serverId, alice.address, 2n]);
 
-        await expect(world.connect(alice).deposit(serverId, amount))
+        await expect(world.connect(alice).deposit(serverId, { value: amount }))
           .to.emit(world, "Deposit")
           .withArgs(alice.address, serverId, expectedDepositId2, amount, spawn, worldFee, rake);
 
@@ -625,11 +582,10 @@ describe("World", function () {
         const worldAddress = await world.getAddress();
         const { spawn } = calcSplits(amount, config.rakeShareBps, config.worldShareBps);
 
-        await token.connect(alice).approve(worldAddress, amount * 3n);
 
-        await world.connect(alice).deposit(serverId, amount);
-        await world.connect(alice).deposit(serverId, amount);
-        await world.connect(alice).deposit(serverId, amount);
+        await world.connect(alice).deposit(serverId, { value: amount });
+        await world.connect(alice).deposit(serverId, { value: amount });
+        await world.connect(alice).deposit(serverId, { value: amount });
 
         const [, bankroll] = await world.getServer(serverId);
         expect(bankroll).to.equal(spawn * 3n);
@@ -641,11 +597,9 @@ describe("World", function () {
         const worldAddress = await world.getAddress();
         const { spawn } = calcSplits(amount, config.rakeShareBps, config.worldShareBps);
 
-        await token.connect(alice).approve(worldAddress, amount);
-        await token.connect(bob).approve(worldAddress, amount);
 
-        await world.connect(alice).deposit(serverId, amount);
-        await world.connect(bob).deposit(serverId, amount);
+        await world.connect(alice).deposit(serverId, { value: amount });
+        await world.connect(bob).deposit(serverId, { value: amount });
 
         const [, bankroll] = await world.getServer(serverId);
         expect(bankroll).to.equal(spawn * 2n);
@@ -654,37 +608,22 @@ describe("World", function () {
       it("reverts on wrong buy-in amount (too low)", async function () {
         const { world, token, serverId, config, alice } = await loadFixture(deployWorldFixture);
         const worldAddress = await world.getAddress();
-        await token.connect(alice).approve(worldAddress, config.buyInAmount);
-        await expect(world.connect(alice).deposit(serverId, config.buyInAmount - 1n)).to.be.revertedWith("invalid buy-in");
+        await expect(world.connect(alice).deposit(serverId, { value: config.buyInAmount - 1n })).to.be.revertedWith("invalid buy-in");
       });
 
       it("reverts on wrong buy-in amount (too high)", async function () {
         const { world, token, serverId, config, alice } = await loadFixture(deployWorldFixture);
         const worldAddress = await world.getAddress();
-        await token.connect(alice).approve(worldAddress, config.buyInAmount * 2n);
-        await expect(world.connect(alice).deposit(serverId, config.buyInAmount + 1n)).to.be.revertedWith("invalid buy-in");
+        await expect(world.connect(alice).deposit(serverId, { value: config.buyInAmount + 1n })).to.be.revertedWith("invalid buy-in");
       });
 
       it("reverts for missing server", async function () {
         const { world, token, config, alice } = await loadFixture(deployWorldFixture);
         const worldAddress = await world.getAddress();
-        await token.connect(alice).approve(worldAddress, config.buyInAmount);
-        await expect(world.connect(alice).deposit(ethers.id("NON_EXISTENT"), config.buyInAmount)).to.be.revertedWith("server missing");
+        await expect(world.connect(alice).deposit(ethers.id("NON_EXISTENT"), { value: config.buyInAmount })).to.be.revertedWith("server missing");
       });
 
-      it("reverts when player has no allowance", async function () {
-        const { world, serverId, config, alice } = await loadFixture(deployWorldFixture);
-        // No approve call
-        await expect(world.connect(alice).deposit(serverId, config.buyInAmount)).to.be.reverted;
-      });
-
-      it("reverts when player has insufficient balance", async function () {
-        const { world, token, serverId, config, other } = await loadFixture(deployWorldFixture);
-        const worldAddress = await world.getAddress();
-        // other has no tokens (not funded in fixture)
-        await token.connect(other).approve(worldAddress, config.buyInAmount);
-        await expect(world.connect(other).deposit(serverId, config.buyInAmount)).to.be.reverted;
-      });
+      // Insufficient balance and allowance are enforced by the EVM for native ETH; no explicit test needed.
     });
   });
 
@@ -692,8 +631,7 @@ describe("World", function () {
     async function prepareDeposit() {
       const fixture = await loadFixture(deployWorldFixture);
       const { world, token, serverId, config, alice } = fixture;
-      await token.connect(alice).approve(await world.getAddress(), config.buyInAmount);
-      await world.connect(alice).deposit(serverId, config.buyInAmount);
+      await world.connect(alice).deposit(serverId, { value: config.buyInAmount });
       return fixture;
     }
 
@@ -719,7 +657,7 @@ describe("World", function () {
       });
 
       it("transfers payout to player", async function () {
-        const { world, token, serverId, config, alice, controller } = await prepareDeposit();
+        const { world, serverId, config, alice, controller } = await prepareDeposit();
         const sessionId = ethers.id("session-transfer");
         const payout = calcSplits(config.buyInAmount, config.rakeShareBps, config.worldShareBps).spawn;
         const deadline = BigInt(await time.latest()) + 3600n;
@@ -733,11 +671,14 @@ describe("World", function () {
           controller,
         });
 
-        const aliceBalanceBefore = await token.balanceOf(alice.address);
-        await world.connect(alice).exitWithSignature(serverId, sessionId, payout, deadline, signature);
-        const aliceBalanceAfter = await token.balanceOf(alice.address);
+        const aliceBalanceBefore = await ethers.provider.getBalance(alice.address);
+        const tx = await world.connect(alice).exitWithSignature(serverId, sessionId, payout, deadline, signature);
+        const receipt = await tx.wait();
+        const gasPrice = BigInt(receipt.effectiveGasPrice ?? receipt.gasPrice ?? 0);
+        const gasCost = BigInt(receipt.gasUsed) * gasPrice;
+        const aliceBalanceAfter = await ethers.provider.getBalance(alice.address);
 
-        expect(aliceBalanceAfter - aliceBalanceBefore).to.equal(payout);
+        expect(aliceBalanceAfter - aliceBalanceBefore + gasCost).to.equal(payout);
       });
 
       it("decreases bankroll by payout amount", async function () {
@@ -810,8 +751,7 @@ describe("World", function () {
         const { world, token, serverId, config, alice, bob, controller } = await prepareDeposit();
 
         // Bob also deposits
-        await token.connect(bob).approve(await world.getAddress(), config.buyInAmount);
-        await world.connect(bob).deposit(serverId, config.buyInAmount);
+        await world.connect(bob).deposit(serverId, { value: config.buyInAmount });
 
         const spawnPerDeposit = calcSplits(config.buyInAmount, config.rakeShareBps, config.worldShareBps).spawn;
         const deadline = BigInt(await time.latest()) + 3600n;
@@ -1048,8 +988,7 @@ describe("World", function () {
         // Create another server and fund it
         const otherServerId = ethers.id("OTHER_SERVER");
         await world.addServer(otherServerId, config);
-        await token.connect(alice).approve(await world.getAddress(), config.buyInAmount);
-        await world.connect(alice).deposit(otherServerId, config.buyInAmount);
+        await world.connect(alice).deposit(otherServerId, { value: config.buyInAmount });
 
         // Sign for original server
         const signature = await signExitTicket({

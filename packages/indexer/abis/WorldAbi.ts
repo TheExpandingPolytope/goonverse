@@ -1,7 +1,6 @@
 export const WorldAbi = [
   {
     inputs: [
-      { internalType: "contract IERC20", name: "_asset", type: "address" },
       { internalType: "address", name: "_rakeRecipient", type: "address" },
       { internalType: "address", name: "_worldRecipient", type: "address" },
     ],
@@ -54,7 +53,7 @@ export const WorldAbi = [
       {
         indexed: false,
         internalType: "uint32",
-        name: "massPerDollar",
+        name: "massPerEth",
         type: "uint32",
       },
       {
@@ -228,7 +227,7 @@ export const WorldAbi = [
       {
         indexed: false,
         internalType: "uint32",
-        name: "massPerDollar",
+        name: "massPerEth",
         type: "uint32",
       },
       {
@@ -273,7 +272,7 @@ export const WorldAbi = [
         components: [
           { internalType: "address", name: "controller", type: "address" },
           { internalType: "uint96", name: "buyInAmount", type: "uint96" },
-          { internalType: "uint32", name: "massPerDollar", type: "uint32" },
+          { internalType: "uint32", name: "massPerEth", type: "uint32" },
           { internalType: "uint16", name: "rakeShareBps", type: "uint16" },
           { internalType: "uint16", name: "worldShareBps", type: "uint16" },
           { internalType: "uint32", name: "exitHoldMs", type: "uint32" },
@@ -289,20 +288,12 @@ export const WorldAbi = [
     type: "function",
   },
   {
-    inputs: [],
-    name: "asset",
-    outputs: [{ internalType: "contract IERC20", name: "", type: "address" }],
-    stateMutability: "view",
-    type: "function",
-  },
-  {
     inputs: [
       { internalType: "bytes32", name: "serverId", type: "bytes32" },
-      { internalType: "uint256", name: "amount", type: "uint256" },
     ],
     name: "deposit",
     outputs: [],
-    stateMutability: "nonpayable",
+    stateMutability: "payable",
     type: "function",
   },
   {
@@ -343,7 +334,7 @@ export const WorldAbi = [
         components: [
           { internalType: "address", name: "controller", type: "address" },
           { internalType: "uint96", name: "buyInAmount", type: "uint96" },
-          { internalType: "uint32", name: "massPerDollar", type: "uint32" },
+          { internalType: "uint32", name: "massPerEth", type: "uint32" },
           { internalType: "uint16", name: "rakeShareBps", type: "uint16" },
           { internalType: "uint16", name: "worldShareBps", type: "uint16" },
           { internalType: "uint32", name: "exitHoldMs", type: "uint32" },
@@ -401,7 +392,6 @@ export const WorldAbi = [
   },
   {
     inputs: [
-      { internalType: "contract IERC20", name: "token", type: "address" },
       { internalType: "address", name: "to", type: "address" },
       { internalType: "uint256", name: "amount", type: "uint256" },
     ],
@@ -424,7 +414,7 @@ export const WorldAbi = [
         components: [
           { internalType: "address", name: "controller", type: "address" },
           { internalType: "uint96", name: "buyInAmount", type: "uint96" },
-          { internalType: "uint32", name: "massPerDollar", type: "uint32" },
+          { internalType: "uint32", name: "massPerEth", type: "uint32" },
           { internalType: "uint16", name: "rakeShareBps", type: "uint16" },
           { internalType: "uint16", name: "worldShareBps", type: "uint16" },
           { internalType: "uint32", name: "exitHoldMs", type: "uint32" },

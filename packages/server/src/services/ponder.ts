@@ -65,7 +65,7 @@ async function graphqlQuery<T>(query: string, variables?: Record<string, unknown
 export async function getDeposit(depositId: `0x${string}`): Promise<Deposit | null> {
   const query = `
     query GetDeposit($id: String!) {
-      deposit(id: $id) {
+      deposits(id: $id) {
         id
         serverId
         player
@@ -81,8 +81,8 @@ export async function getDeposit(depositId: `0x${string}`): Promise<Deposit | nu
   `;
 
   try {
-    const data = await graphqlQuery<{ deposit: Deposit | null }>(query, { id: depositId });
-    return data.deposit;
+    const data = await graphqlQuery<{ deposits: Deposit | null }>(query, { id: depositId });
+    return data.deposits ? normalizeDeposit(data.deposits) : null;
   } catch (error) {
     console.error("Failed to get deposit:", error);
     return null;
@@ -93,12 +93,15 @@ export async function getDeposit(depositId: `0x${string}`): Promise<Deposit | nu
  * Get deposits for a player on a specific server
  */
 export async function getPlayerDeposits(
-  serverId: `0x${string}`,
+  serverId: string,
   player: `0x${string}`
 ): Promise<Deposit[]> {
+  // Convert human-readable serverId (e.g. "world_001") to bytes32 hex for the indexer
+  const serverIdHex = stringToBytes32(serverId);
+
   const query = `
     query GetPlayerDeposits($serverId: String!, $player: String!) {
-      deposits(
+      depositss(
         where: { serverId: $serverId, player: $player }
         orderBy: "timestamp"
         orderDirection: "desc"
@@ -120,11 +123,12 @@ export async function getPlayerDeposits(
   `;
 
   try {
-    const data = await graphqlQuery<{ deposits: { items: Deposit[] } }>(query, {
-      serverId,
+    const data = await graphqlQuery<{ depositss: { items: Deposit[] } }>(query, {
+      serverId: serverIdHex,
       player: player.toLowerCase(),
     });
-    return data.deposits.items;
+    console.log("data", data, "for serverId", serverId, "(hex:", serverIdHex, ")", "player", player);
+    return data.depositss.items.map(normalizeDeposit);
   } catch (error) {
     console.error("Failed to get player deposits:", error);
     return [];
@@ -135,12 +139,15 @@ export async function getPlayerDeposits(
  * Get exits for a player on a specific server
  */
 export async function getPlayerExits(
-  serverId: `0x${string}`,
+  serverId: string,
   player: `0x${string}`
 ): Promise<Exit[]> {
+  // Convert human-readable serverId to bytes32 hex for the indexer
+  const serverIdHex = stringToBytes32(serverId);
+
   const query = `
     query GetPlayerExits($serverId: String!, $player: String!) {
-      exits(
+      exitss(
         where: { serverId: $serverId, player: $player }
         orderBy: "timestamp"
         orderDirection: "desc"
@@ -160,11 +167,11 @@ export async function getPlayerExits(
   `;
 
   try {
-    const data = await graphqlQuery<{ exits: { items: Exit[] } }>(query, {
-      serverId,
+    const data = await graphqlQuery<{ exitss: { items: Exit[] } }>(query, {
+      serverId: serverIdHex,
       player: player.toLowerCase(),
     });
-    return data.exits.items;
+    return data.exitss.items;
   } catch (error) {
     console.error("Failed to get player exits:", error);
     return [];
@@ -180,10 +187,13 @@ export async function getPlayerExits(
  * @returns The deposit if valid, null otherwise
  */
 export async function verifyDeposit(
-  serverId: `0x${string}`,
+  serverId: string,
   depositId: `0x${string}`,
   player: `0x${string}`
 ): Promise<Deposit | null> {
+  // Convert human-readable serverId to bytes32 hex for comparison with indexer data
+  const serverIdHex = stringToBytes32(serverId);
+
   const deposit = await getDeposit(depositId);
 
   if (!deposit) {
@@ -192,8 +202,10 @@ export async function verifyDeposit(
   }
 
   // Verify server ID matches
-  if (deposit.serverId.toLowerCase() !== serverId.toLowerCase()) {
-    console.log(`Deposit ${depositId} is for server ${deposit.serverId}, not ${serverId}`);
+  if (deposit.serverId.toLowerCase() !== serverIdHex.toLowerCase()) {
+    console.log(
+      `Deposit ${depositId} is for server ${deposit.serverId}, not ${serverIdHex} (requested ${serverId})`
+    );
     return null;
   }
 
@@ -207,16 +219,30 @@ export async function verifyDeposit(
 }
 
 /**
+ * Convert a string to bytes32 hex format
+ * e.g., "local-1" -> "0x6c6f63616c2d3100000000000000000000000000000000000000000000000000"
+ */
+function stringToBytes32(str: string): `0x${string}` {
+  const hex = Buffer.from(str, "utf8").toString("hex");
+  // Pad to 64 hex characters (32 bytes)
+  const padded = hex.padEnd(64, "0");
+  return `0x${padded}` as `0x${string}`;
+}
+
+/**
  * Get server configuration from the indexer
  */
-export async function getServer(serverId: `0x${string}`) {
+export async function getServer(serverId: string) {
+  // Convert string serverId to bytes32 hex format
+  const serverIdHex = stringToBytes32(serverId);
+
   const query = `
     query GetServer($id: String!) {
-      server(id: $id) {
+      servers(id: $id) {
         id
         controller
         buyInAmount
-        massPerDollar
+        massPerEth
         rakeShareBps
         worldShareBps
         exitHoldMs
@@ -227,22 +253,34 @@ export async function getServer(serverId: `0x${string}`) {
 
   try {
     const data = await graphqlQuery<{
-      server: {
+      servers: {
         id: `0x${string}`;
         controller: `0x${string}`;
         buyInAmount: string;
-        massPerDollar: number;
+        massPerEth: number;
         rakeShareBps: number;
         worldShareBps: number;
         exitHoldMs: number;
         isActive: boolean;
       } | null;
-    }>(query, { id: serverId });
+    }>(query, { id: serverIdHex });
 
-    return data.server;
+    return data.servers ?? null;
   } catch (error) {
     console.error("Failed to get server:", error);
     return null;
   }
+}
+
+function normalizeDeposit(raw: Deposit): Deposit {
+  return {
+    ...raw,
+    amount: BigInt(raw.amount ?? 0n),
+    spawnAmount: BigInt(raw.spawnAmount ?? 0n),
+    worldAmount: BigInt(raw.worldAmount ?? 0n),
+    rakeAmount: BigInt(raw.rakeAmount ?? 0n),
+    blockNumber: BigInt(raw.blockNumber ?? 0n),
+    timestamp: BigInt(raw.timestamp ?? 0n),
+  };
 }
 

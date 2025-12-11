@@ -112,8 +112,8 @@
       ]
     },
     "/home/glockiana/Documents/incubator/goonverse/packages/contract/contracts/World.sol": {
-      "lastModificationDate": 1764992122306,
-      "contentHash": "298607a144777f3501a03d2555df7a62",
+      "lastModificationDate": 1765251857202,
+      "contentHash": "f4ab8c4ef7d46b26e3b62cc0448467ea",
       "sourceName": "contracts/World.sol",
       "solcConfig": {
         "version": "0.8.20",
@@ -140,7 +140,6 @@
         }
       },
       "imports": [
-        "@openzeppelin/contracts/token/ERC20/IERC20.sol",
         "@openzeppelin/contracts/utils/cryptography/ECDSA.sol",
         "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol",
         "@openzeppelin/contracts/utils/ReentrancyGuard.sol",

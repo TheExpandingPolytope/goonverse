@@ -5,13 +5,13 @@ import { servers, deposits, exits } from "ponder:schema";
  * Handle AddedServer event - create new server entry
  */
 ponder.on("World:AddedServer", async ({ event, context }) => {
-  const { serverId, controller, buyInAmount, massPerDollar, rakeShareBps, worldShareBps, exitHoldMs } = event.args;
+  const { serverId, controller, buyInAmount, massPerEth, rakeShareBps, worldShareBps, exitHoldMs } = event.args;
 
   await context.db.insert(servers).values({
     id: serverId,
     controller: controller,
     buyInAmount: buyInAmount,
-    massPerDollar: massPerDollar,
+    massPerEth: massPerEth,
     rakeShareBps: rakeShareBps,
     worldShareBps: worldShareBps,
     exitHoldMs: exitHoldMs,
@@ -27,14 +27,14 @@ ponder.on("World:AddedServer", async ({ event, context }) => {
  * Handle UpdatedServer event - update existing server config
  */
 ponder.on("World:UpdatedServer", async ({ event, context }) => {
-  const { serverId, controller, buyInAmount, massPerDollar, rakeShareBps, worldShareBps, exitHoldMs } = event.args;
+  const { serverId, controller, buyInAmount, massPerEth, rakeShareBps, worldShareBps, exitHoldMs } = event.args;
 
   await context.db
     .update(servers, { id: serverId })
     .set({
       controller: controller,
       buyInAmount: buyInAmount,
-      massPerDollar: massPerDollar,
+      massPerEth: massPerEth,
       rakeShareBps: rakeShareBps,
       worldShareBps: worldShareBps,
       exitHoldMs: exitHoldMs,

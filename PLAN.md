@@ -7,10 +7,10 @@ _Agar.io-style real-money arena with minimal on-chain state_
 
 AgarCash is a **real-time Agar.io-like game** where:
 
-- Players **deposit USDC** to join a round.
-- Deposits are converted into **in-game mass** via a fixed **Mass-Per-Dollar (MPD)** rate.
+- Players **deposit ETH** to join a round.
+- Deposits are converted into **in-game mass** via a fixed **Mass-Per-Dollar (MPD)** rate (we keep the MPD terminology for economy tuning even though settlement is in ETH).
 - Players grow by **eating pellets** and **consuming smaller players**.
-- At the end of the round, each player’s **final mass** is converted back into USDC.
+- At the end of the round, each player’s **final mass** is converted back into ETH.
 - Each server maintains its own contract and worldPool balance for the spawning of pellets.
 
 Key constraints:
@@ -24,7 +24,7 @@ Key constraints:
   - claimable amounts for each player
 
 - **Everything in-game is mass**.  
-  USDC is only used at the boundaries:
+  ETH is only used at the boundaries:
   - deposit → mass
   - mass → payout (claimable)
 
@@ -49,7 +49,7 @@ Key constraints:
 
 A **lobby** is a set of games with:
 
-- A **base buy-in** `B` (in USDC)
+- A **base buy-in** `B` (in ETH)
 - A **target starting mass** `M_base` (mass units)
 - A **fixed Mass-Per-Dollar** `MPD` for all rounds in that lobby
 - A **rake** rate. Percentage of the total payout that is taken for the developer (at the end of each round)
@@ -69,21 +69,21 @@ For a lobby:
 MPD = M_base / B
 ```
 
-- `B` = base buy-in (USDC)
+- `B` = base buy-in (ETH)
 - `M_base` = desired starting mass for a player depositing exactly `B`
 
 Conversion:
 
 ```text
-mass = USDC * MPD
-USDC = mass / MPD
+mass = ETH * MPD
+ETH = mass / MPD
 ```
 
 This rate is **fixed per lobby** and does not change per round.
 
 ### 1.5 worldPool
 
-- The **worldPool** is the amount of USDC maintained by the server to fun the pellet spawning and (potentially) other rewards down the line.
+- The **worldPool** is the amount of ETH maintained by the server to fund pellet spawning and (potentially) other rewards down the line.
 - Conceptually backs:
   - Ensures pellets exist for every time a player joins at the very least. (when they deposit to spawn, portion goes to worldPool)
   - Any "extra" game value not paid out to players
@@ -340,8 +340,8 @@ The contract only needs, per `commitRoundResults`:
 - `players[]`
 - `finalMasses[]`
 - It knows:
-  - `massPerDollar` (MPD)
-  - Its own USDC balance
+  - `massPerEth` (MPD)
+  - Its own ETH balance
 
 Using these it:
 
@@ -361,7 +361,7 @@ For each lobby/server contract:
 ```solidity
 struct LobbyParams {
     uint256 baseBuyIn;         // B
-    uint256 massPerDollar;     // MPD
+    uint256 massPerEth;        // MPD
     uint256 rakeBps;           // e.g. 250 (2.5%)
     uint256 worldBps;          // e.g. 250 (2.5%)
 }

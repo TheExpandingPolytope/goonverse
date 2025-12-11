@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
@@ -15,7 +14,7 @@ contract World is Ownable, ReentrancyGuard {
     struct ServerConfig {
         address controller;
         uint96 buyInAmount;
-        uint32 massPerDollar;
+        uint32 massPerEth;
         uint16 rakeShareBps;
         uint16 worldShareBps;
         uint32 exitHoldMs;
@@ -27,7 +26,6 @@ contract World is Ownable, ReentrancyGuard {
         bool exists;
     }
 
-    IERC20 public immutable asset; // e.g. USDC
     address public rakeRecipient;
     address public worldRecipient;
 
@@ -46,7 +44,7 @@ contract World is Ownable, ReentrancyGuard {
         bytes32 indexed serverId,
         address indexed controller,
         uint96 buyInAmount,
-        uint32 massPerDollar,
+        uint32 massPerEth,
         uint16 rakeShareBps,
         uint16 worldShareBps,
         uint32 exitHoldMs
@@ -56,7 +54,7 @@ contract World is Ownable, ReentrancyGuard {
         bytes32 indexed serverId,
         address indexed controller,
         uint96 buyInAmount,
-        uint32 massPerDollar,
+        uint32 massPerEth,
         uint16 rakeShareBps,
         uint16 worldShareBps,
         uint32 exitHoldMs
@@ -82,12 +80,9 @@ contract World is Ownable, ReentrancyGuard {
     );
 
     constructor(
-        IERC20 _asset,
         address _rakeRecipient,
         address _worldRecipient
     ) Ownable(msg.sender) {
-        require(address(_asset) != address(0), "asset=0");
-        asset = _asset;
         _updateRakeRecipient(_rakeRecipient);
         _updateWorldRecipient(_worldRecipient);
     }
@@ -105,7 +100,7 @@ contract World is Ownable, ReentrancyGuard {
             serverId,
             config.controller,
             config.buyInAmount,
-            config.massPerDollar,
+            config.massPerEth,
             config.rakeShareBps,
             config.worldShareBps,
             config.exitHoldMs
@@ -123,7 +118,7 @@ contract World is Ownable, ReentrancyGuard {
             serverId,
             config.controller,
             config.buyInAmount,
-            config.massPerDollar,
+            config.massPerEth,
             config.rakeShareBps,
             config.worldShareBps,
             config.exitHoldMs
@@ -146,19 +141,18 @@ contract World is Ownable, ReentrancyGuard {
         _updateWorldRecipient(recipient);
     }
 
-    function sweep(IERC20 token, address to, uint256 amount) external onlyOwner {
+    function sweep(address payable to, uint256 amount) external onlyOwner {
         require(to != address(0), "to=0");
-        require(token.transfer(to, amount), "transfer fail");
+        _transferEth(to, amount);
     }
 
     // --- Gameplay ---
 
-    function deposit(bytes32 serverId, uint256 amount) external nonReentrant {
+    function deposit(bytes32 serverId) external payable nonReentrant {
         ServerState storage state = servers[serverId];
         require(state.exists, "server missing");
+        uint256 amount = msg.value;
         require(amount == state.config.buyInAmount, "invalid buy-in");
-
-        require(asset.transferFrom(msg.sender, address(this), amount), "transferFrom fail");
 
         uint256 rakeAmount = (amount * state.config.rakeShareBps) / BPS;
         uint256 worldAmount = (amount * state.config.worldShareBps) / BPS;
@@ -167,12 +161,12 @@ contract World is Ownable, ReentrancyGuard {
 
         if (rakeAmount > 0) {
             require(rakeRecipient != address(0), "rake recipient unset");
-            require(asset.transfer(rakeRecipient, rakeAmount), "rake transfer fail");
+            _transferEth(payable(rakeRecipient), rakeAmount);
         }
 
         if (worldAmount > 0) {
             require(worldRecipient != address(0), "world recipient unset");
-            require(asset.transfer(worldRecipient, worldAmount), "world transfer fail");
+            _transferEth(payable(worldRecipient), worldAmount);
         }
 
         state.bankroll += spawnAmount;
@@ -212,7 +206,7 @@ contract World is Ownable, ReentrancyGuard {
         exitedSessions[serverId][sessionId] = true;
         state.bankroll -= payout;
 
-        require(asset.transfer(msg.sender, payout), "transfer fail");
+        _transferEth(payable(msg.sender), payout);
 
         emit Exit(msg.sender, serverId, sessionId, payout);
     }
@@ -230,7 +224,7 @@ contract World is Ownable, ReentrancyGuard {
     function _validateConfig(ServerConfig calldata config) private pure {
         require(config.controller != address(0), "controller=0");
         require(config.buyInAmount > 0, "buyIn=0");
-        require(config.massPerDollar > 0, "MPD=0");
+        require(config.massPerEth > 0, "MPD=0");
         require(config.rakeShareBps + config.worldShareBps < BPS, "fees >= 100%" );
     }
 
@@ -244,5 +238,10 @@ contract World is Ownable, ReentrancyGuard {
         require(recipient != address(0), "world recipient=0");
         worldRecipient = recipient;
         emit WorldRecipientUpdated(recipient);
+    }
+
+    function _transferEth(address payable to, uint256 amount) private {
+        (bool success, ) = to.call{value: amount}("");
+        require(success, "eth transfer fail");
     }
 }

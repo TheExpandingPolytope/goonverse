@@ -2,12 +2,11 @@
 
 ## 1. High-Level Overview
 
-The system consists of five main components:
+The system consists of four main components:
 1.  **Client**: The player's interface (React/Canvas/Privy) plus lobby UX.
-2.  **Game Server**: Authoritative game logic (Colyseus/Express/Node.js/Typescript).
-3.  **Server Directory**: Aggregates presence data from every server and exposes REST endpoints so the client can discover/filter worlds.
-4.  **Smart Contract**: Economic settlement and custody (Solidity/Base).
-5.  **Indexer (Ponder)**: Real-time event indexing, solvency tracking, and round lifecycle streaming.
+2.  **Game Server**: Authoritative game logic (Colyseus/Express/Node.js/Typescript). Also exposes all lobby/discovery REST endpoints directly.
+3.  **Smart Contract**: Economic settlement and custody (Solidity/Base).
+4.  **Indexer (Ponder)**: Real-time event indexing, solvency tracking, and round lifecycle streaming.
 
 ```mermaid
 graph TD
@@ -23,21 +22,20 @@ graph TD
     end
     
     subgraph "Infrastructure"
-        Directory[Server Directory]
+        Redis[(Redis Presence)]
         Ponder[Ponder Indexer]
         DB[(Postgres DB)]
     end
 
     User <--> Client
     Client <-->|WebSockets| Server
-    Client <-->|HTTPS| Directory
-    Directory <-->|Presence Sync| Server
-    Directory -->|Writes| DB
+    Client <-->|HTTPS| Server
+    Server <-->|Presence Sync| Redis
     Client -->|Transactions| Contract
-    Contract -->|Events| Ponder
-    Ponder -->|Writes| DB
     Server <-->|GraphQL Queries| Ponder
     Server -->|Settlement Txs| Contract
+    Contract -->|Events| Ponder
+    Ponder -->|Writes| DB
     Ponder -->|Round Events| Server
 ```
 
@@ -49,17 +47,17 @@ graph TD
 **Role:** Custody, upfront fee splitting, continuous settlement, and authoritative registry for every Game Server.
 
 *   **Server Registry**
-    *   `servers[bytes32 serverId]`: stores `{ controller, buyInUSD, configHash, massPerDollar, rakeShareBps, worldShareBps, exitHoldMs }`.
-    *   `addServer(serverId, controller, buyInUSD, config)`: admin-only. Adds/updates an entry so new servers can come online without redeploying contracts.
+*   `servers[bytes32 serverId]`: stores `{ controller, buyInAmount, configHash, massPerEth, rakeShareBps, worldShareBps, exitHoldMs }` where `buyInAmount` is denominated in wei (ETH).
+*   `addServer(serverId, controller, buyInAmount, config)`: admin-only. Adds/updates an entry so new servers can come online without redeploying contracts.
     *   `removeServer(serverId)`: admin-only. Immediately locks deposits/exits for that server.
 
 *   **Economy Parameters (per `serverId`):**
-    *   `massPerDollar`: deterministic conversion between spawned mass and USD for that shard.
+*   `massPerEth`: deterministic conversion between spawned mass and one ETH-equivalent unit for that shard (we keep the scalar for gameplay tuning).
     *   `rakeShareBps` / `worldShareBps`: basis-point splits used to route value to the developer and the shared world pool. Whatever remains becomes the playable spawn budget (escrowed in `serverBankroll[serverId]`).
     *   `exitHoldMs`: milliseconds a player must hold spacebar to successfully cash out; tunable per server to balance risk/reward.
 
 *   **Write Interfaces (all scoped by `serverId`):**
-    *   `deposit(bytes32 serverId, uint256 amount)`: User funds a session. The contract splits the amount into `{ spawnAmount, worldAmount, rakeAmount }`, transfers rake/world shares immediately, credits `serverBankroll[serverId] += spawnAmount`, and emits `Deposit(player, spawnAmount, worldAmount, rakeAmount, serverId, depositId)`.
+*   `deposit(bytes32 serverId) payable`: User funds a session with ETH. The contract splits `msg.value` into `{ spawnAmount, worldAmount, rakeAmount }`, transfers rake/world shares immediately, credits `serverBankroll[serverId] += spawnAmount`, and emits `Deposit(player, spawnAmount, worldAmount, rakeAmount, serverId, depositId)`.
     *   `exitWithSignature(bytes32 serverId, bytes32 sessionId, uint256 payout, bytes signature)`: Player-triggered withdraw. Verifies that the payload was signed by the registered `controller`, checks `payout <= serverBankroll[serverId]`, checks `exitedSessions[serverId][sessionId] == false` (replay protection), marks session as exited, debits the bankroll, and transfers `payout` to the player. Gas is paid by the player.
     *   (Optional) `cancelDeposit(serverId, depositId)`: Used if a player never joins after depositing; refunds `spawnAmount` minus fees.
 
@@ -67,7 +65,7 @@ graph TD
     *   `exitedSessions[serverId][sessionId]`: `bool` — prevents the same exit ticket from being claimed twice.
 
 *   **Events (Listened to by Ponder):**
-    *   `AddedServer(serverId, controller, buyInUSD, configHash, massPerDollar, rakeShareBps, worldShareBps, exitHoldMs)`
+*   `AddedServer(serverId, controller, buyInAmount, configHash, massPerEth, rakeShareBps, worldShareBps, exitHoldMs)`
     *   `RemovedServer(serverId)`
     *   `Deposit(address player, uint256 spawnAmount, uint256 worldAmount, uint256 rakeAmount, bytes32 serverId, bytes32 depositId)`
     *   `Exit(address player, bytes32 serverId, bytes32 sessionId, uint256 payout)`
@@ -84,7 +82,7 @@ graph TD
     *   `playerStats(address)`: Historical wins/losses (optional but handy for UX).
     *   `worldPoolBalance()`: Computed aggregate of `worldShare` from all deposits vs. payouts.
 *   **Data Model**
-    *   `servers` table: `{ serverId (PK), controller, buyInUSD, configHash, massPerDollar, rakeShareBps, worldShareBps, exitHoldMs, lastHeartbeatBlock }`.
+*   `servers` table: `{ serverId (PK), controller, buyInAmount, configHash, massPerEth, rakeShareBps, worldShareBps, exitHoldMs, lastHeartbeatBlock }`.
     *   `deposits` table: `{ depositId (PK), serverId, player, amount, spawnMass, rakeAmount, worldAmount, exitedAmount, blockNumber, timestamp }`.
     *   `sessions` table: `{ serverId, sessionId, player, depositId, spawnedMass, exitRequestedAt, exitCompletedAt, finalPayout }`.
     *   `exits` table: `{ exitTxHash (PK), serverId, sessionId, player, payout, blockNumber }`.
@@ -100,38 +98,53 @@ graph TD
     *   `onJoin(client, options, auth)`: Called only after `onAuth` succeeds; validates `{ serverId, depositId, wallet }` via Ponder to ensure the user deposited for this shard and that the deposit hasn’t been fully exited. Issues a `sessionId`, records spawn mass, and binds `auth` (verified Privy claims) to the physics entity.
     *   `sessionManager`: Tracks per-client spawn mass, deficit (because of rake/world), and accumulated gains/losses. Exposes APIs to start/stop the **Hold-to-Exit Timer**.
     *   `exitController`: Triggered when sustained `spacebar: true` is detected in the input stream:
-        1.  Marks the blob as "exiting" and applies TBD exit-hold behavior (slowdown, shrink, freeze, etc.).
+        1.  Marks the blob as "exiting" and applies exit penalties: **speed reduced** by `EXIT_SPEED_PENALTY`, **radius shrinks** toward `EXIT_MIN_RADIUS_FACTOR` over the hold duration (see §4.10).
         2.  Starts a countdown (`exitHoldMs`, configurable per server). If spacebar is released or the blob dies, cancel the exit and resume gameplay.
-        3.  On success: snapshots final mass, converts to payout using `massPerDollar`, clamps by `availableHeadroom`, despawns blob, closes session.
+        3.  On success: snapshots final mass, converts to payout using `massPerEth`, clamps by `availableHeadroom`, despawns blob, closes session.
         4.  Signs `ExitTicket { serverId, sessionId, player, payout, nonce, expiry }` and persists it in Redis (`exit_ticket:{serverId}:{sessionId}`, TTL = expiry).
         5.  Reserves payout from bankroll headroom (`availableHeadroom -= payout`) so concurrent exits don't overdraw.
         6.  Sends ticket to client in the session-close message; on `Exit` event confirmation from indexer, deletes ticket and finalizes bankroll deduction.
-    *   `update()`: Runs physics loop (20-60Hz), applies mass decay, and enforces transfer inefficiencies so feeding collusion stays costly.
-    *   `presenceHeartbeat()`: Publishes `{ serverId, status, players, exitHoldMs, bankrollHeadroom }` into Redis Presence so the Directory and homepage stay synchronized.
+    *   `update()`: Runs physics loop (`TICK_RATE` Hz), processes movement, collision detection, eating logic, and exit hold progression. See §4 for full game rules.
+*   `presenceHeartbeat()`: Publishes `{ serverId, status, players, exitHoldMs, bankrollHeadroom }` into Redis Presence so `/rooms` responses and ops dashboards stay synchronized.
 
 ### 2.4 Client (`RootApp.tsx`)
-**Role:** The full game client (canvas + UI shell). Orchestrates identity, wallet balance checks, Directory-backed server discovery, and the "Play" CTA before handing control to the Colyseus room.
+**Role:** The full game client (canvas + UI shell). Orchestrates identity, wallet balance checks, direct server discovery (via `/rooms`), and the "Play" CTA before handing control to the Colyseus room.
+
+#### Frontend Implementation Stack
+
+| Layer | Technology | Notes |
+|-------|------------|-------|
+| Rendering / Game View | **Canvas API + TypeScript** | The gameplay surface is a plain `<canvas>` managed via low-level Canvas 2D APIs for predictable performance. TypeScript typings wrap the canvas helpers (stroke/fill, off-screen buffers, etc.) so physics projections line up with the Colyseus state schema. |
+| UI Shell | **React 18** | All overlay UX (lobby, HUD, modals) lives in React components. React Context provides a shared store between the canvas renderer and UI widgets for things like exit-status, pellet counts, or latency warnings. |
+| Design System | **shadcn/ui** | Buttons, dialogs, form controls, and toasts are pulled from shadcn/ui (tailwind-agnostic headless components) to keep styling consistent. We wrap shadcn primitives with project-specific themes and animation tokens. |
+| Realtime Networking | **`colyseus.js` client** | React hooks call `client.joinOrCreate("game")`, hydrate the read-only Schema proxies, and subscribe via `getStateCallbacks`. All outbound input uses the Colyseus reliable message channel (`room.send("input", payload)`). |
+| Auth / Wallet | **Privy SDK (`@privy-io/react-auth`)** | The navbar hosts Privy’s auth widget. After login, we call `getAccessToken()` and set `client.auth.token`. Privy’s hooks provide `linkedWallets`, and we route `depositId` + wallet into the Colyseus join payload. |
+
+Key files:
+1. `apps/web/src/providers/GameClientProvider.tsx` – bootstraps the Colyseus client, exposes hooks for state + mutations.
+2. `apps/web/src/components/canvas/GameCanvas.tsx` – pure TypeScript canvas renderer, listening to Schema diffs and drawing blobs/pellets every animation frame.
+3. `apps/web/src/components/ui/*` – shadcn-based components used across lobby + overlays.
 
 *   **Auth & Identity**
     *   On page load, call Privy to hydrate `authState`. Maintain `session`, `user`, `linkedWallets`.
     *   Immediately fetch a short-lived Privy access token via `getAccessToken()` (React hook) and refresh it whenever `authState` changes so outbound API calls and Colyseus joins can be signed.
-    *   Navbar shows `Sign In` when no Privy session; otherwise display `username`, `primaryWallet`, `USDC balance`.
+*   Navbar shows `Sign In` when no Privy session; otherwise display `username`, `primaryWallet`, `ETH balance`.
     *   Login/sign-up modal is the same surface triggered by navbar and by the `Play` button guard.
 *   **Balances & Funding**
     *   Uses `viem/wagmi` `getBalance` against Base RPC for the selected wallet.
-    *   Maintains `selectedBuyInUSD`. If `walletBalance < buyIn`, surface `Fund Wallet` panel (ramps or bridging).
+*   Maintains `selectedBuyIn` (ETH-denominated). If `walletBalance < buyIn`, surface `Fund Wallet` panel (ramps or bridging).
 *   **Server Discovery UI**
-    *   On mount call the Directory’s `GET /servers` once, cache the full set of active servers plus metadata (status, ping hint, region, `serverId`, live round info, `currentRoundId`).
-    *   Provide tabs for buy-in presets (`$1`, `$5`, `$10`, custom) that **filter locally** within the cached dataset, along with a searchable dropdown for all regions/instances.
+    *   On mount call any game server’s `GET /rooms` once, cache the full set of active rooms (metadata includes status, ping hint, region, `serverId`, live round info, `currentRoundId`).
+*   Provide tabs for buy-in presets (e.g., `0.01 ETH`, `0.02 ETH`, custom) that **filter locally** within the cached dataset, along with a searchable dropdown for all regions/instances.
     *   Best-ping suggestion: run lightweight RTT probe against each server’s `/healthz` endpoint and pre-select the lowest latency option.
 *   **CTA & Consent Flow**
     *   Giant `Play` button remains visible regardless of auth state.
-    *   Guards (in order): requires Privy session → successful Privy access token refresh → sufficient funds → user confirmation that `$X` will be deposited (highlighting rake/world shares so they understand the starting deficit) → triggers `deposit(serverId, amount)` on `World.sol`.
+*   Guards (in order): requires Privy session → successful Privy access token refresh → sufficient funds → user confirmation that `ΞX` will be deposited (highlighting rake/world shares so they understand the starting deficit) → triggers `deposit(serverId, amount)` on `World.sol`.
     *   After the deposit transaction is accepted, the client issues the Colyseus `joinOrCreate` request with `{ serverId, depositId, wallet }`, includes the Privy access token as the Colyseus auth header, and collapses the pre-game UI once the server verifies the deposit with the indexer.
     *   Because there's no round gating, availability depends on bankroll headroom; servers that fall below a threshold are marked “Drained” and the CTA nudges users toward healthier shards.
 *   **Hold-to-Exit UX**
     *   Exit is triggered by holding the **spacebar** (same input channel as gameplay). When the server detects sustained spacebar input, it starts the exit countdown (`exitHoldMs`, configurable per server). The UI renders a progress ring over the blob.
-    *   **Blob behavior during hold:** TBD — could be frozen, slowed, shrinking, or some other penalty. Will be finalized alongside the physics/server-authority model.
+    *   **Blob behavior during hold:** Speed is reduced by `EXIT_SPEED_PENALTY` and radius shrinks toward `EXIT_MIN_RADIUS_FACTOR` over the hold duration. The shrinking makes the blob vulnerable to being eaten by smaller opponents (see §4.10).
     *   If spacebar is released or the blob dies, the exit is cancelled and normal gameplay resumes.
     *   Once the hold completes, the server **despawns the blob, closes the session**, and issues an `ExitTicket`. The ticket is persisted server-side (Redis) and sent to the client in the session-close payload. The UI stores the ticket in `localStorage` as backup and immediately prompts the wallet for `exitWithSignature()`.
     *   If the browser closes before the tx lands, the client checks `localStorage` on next load and/or calls `GET /sessions/pending-exits` (Privy-auth-gated) to retrieve any unclaimed tickets.
@@ -140,36 +153,35 @@ graph TD
     *   The UI shell communicates with the canvas via a shared context/store (`GameClientProvider`), allowing overlays (deposit form, exit hold overlay, post-exit summary) to toggle without reloading the WebGL scene.
     *   When the player exits/disconnects, the lobby shell re-opens and re-fetches balances, session history, and leaderboard stats to keep the experience fresh.
 
-### 2.5 Server Directory & Lobby Feed
-**Role:** Provide the homepage with real-time knowledge of every Colyseus server, its buy-in tier, round status, and entry contract.
+### 2.5 Room Discovery & Lobby Feed
+**Role:** Provide the homepage with real-time knowledge of every Colyseus room across all game server instances.
 
-*   **Metadata Contract**
-    *   All servers share a single `World.sol` deployment. The Directory mirrors the on-chain registry (`AddedServer`/`RemovedServer` events) into `{ serverId, controller, buyInUSD, configHash, rpcUrl }`.
-*   **Colyseus Hooks**
-    *   Every room definition uses `gameServer.define("agar_world", GameRoom, { buyInUSD })` plus `.filterBy(['buyInUSD', 'maxClients'])`, `.sortBy({ clients: 1 })`, and `.enableRealtimeListing()` so that Lobby consumers can subscribe to status changes ([Colyseus Server docs](https://docs.colyseus.io/server)).
-    *   Presence/Driver backends (Redis) keep the directory coherent across horizontally scaled processes; `RedisPresence` enables cross-process room discovery while a custom driver persists room metadata for API reads.
-*   **Directory API**
-    *   `GET /servers`: returns the whole active set (`serverId`, `roundState`, `currentRoundId`, `playersOnline`, `availableSlots`, `avgPing`, `region`, `buyInUSD`, `worldContract`) so clients can filter locally without repeated network calls.
-    *   `GET /servers/:id`: deeper stats (per `serverId`) plus the transport endpoint used by the client to open the Colyseus WebSocket.
-    *   `GET /servers/:id/ping`: lightweight JSON response for browser RTT probing.
-*   **Health / Lifecycle**
-    *   Servers emit `create`, `lock`, `unlock`, `dispose` lifecycle events to the directory service for monitoring.
-    *   Shutdown hooks call `gameServer.onBeforeShutdown` and `gracefullyShutdown()` to remove entries cleanly before process exits.
-*   **Data Flow**
-    *   Directory service mirrors active rooms into Postgres (or Redis hash) for the homepage.
-    *   A separate cron refreshes stale entries and reconciles with infrastructure (Kubernetes, Fly, etc.) to ensure the UI never shows dead instances.
-*   **Redis Presence Schema**
-    *   Each `GameRoom` registers itself under `world:${roomId}` with fields: `{ serverId, machineId, processId, buyInUSD, bankrollHeadroom, status (Open|Drained|Maintenance), players, maxClients, wsEndpoint, worldContract }`.
-    *   Secondary indexes: `presence.sadd(worlds:${buyInUSD}, roomId)` for quick filtering by stake, and `presence.hset(machine:${machineId}, roomId, status)` to let orchestration know how many rooms each box hosts.
-    *   Presence TTLs are refreshed every heartbeat; when a room shuts down gracefully it deletes its keys so the directory never surfaces ghost worlds.
-*   **Process vs. Machine Layout**
-    *   A single machine can host multiple `GameRoom` instances (e.g., `$1` and `$5` buy-ins) and each instance becomes its own presence entry (`roomId` as primary key).
-    *   Horizontal scaling is done by bringing up more machines, but the presence schema doesn’t care—rooms from different machines share the same namespace while still exposing their `machineId` for observability.
-    *   If we ever need multiple rooms of the same buy-in on one machine (for load shedding), they simply register unique `roomId`s; the homepage still treats them as separate worlds because buyers choose the exact server they’ll join.
-*   **Persistent Directory Store**
-    *   `servers` table in Postgres mirrors on-chain + presence data: `{ serverId (PK), controller, region, buyInUSD, massPerDollar, rakeShareBps, worldShareBps, exitHoldMs, status, bankrollHeadroom, avgPing, playersOnline, availableSlots, wsEndpoint, rpcUrl, lastPresenceAt }`.
-    *   `metrics` table: `{ serverId, cpu, mem, tickRate, updatedAt }` derived from health probes.
-    *   Cached JSON response of `GET /servers` stored in Redis (`directory:servers`) so clients can fetch quickly; invalidated whenever presence updates or on-chain registry events arrive.
+*   **Architecture**
+    *   No separate Directory service is needed. The Game Server exposes room discovery endpoints directly.
+    *   `RedisDriver` from `@colyseus/redis-driver` stores room metadata in Redis, enabling `matchMaker.query()` to return rooms from ALL processes/machines.
+    *   `RedisPresence` enables cross-process communication for pub/sub and shared state.
+    *   Clients can call any game server's `/rooms` endpoint and receive the complete room listing.
+
+*   **Game Server Endpoints**
+    *   `GET /rooms`: returns all active rooms via `matchMaker.query()`. Each room includes `{ roomId, name, clients, maxClients, locked, metadata, createdAt }`.
+    *   `GET /ping`: lightweight JSON response for browser RTT measurement.
+    *   `GET /healthz`: health check endpoint.
+
+*   **Room Metadata**
+    *   Each `GameRoom` calls `this.setMetadata()` in `onCreate()` with: `{ serverId, buyInAmount, massPerEth, region, worldContract }`.
+    *   This metadata is automatically included in `matchMaker.query()` results and exposed via `/rooms`.
+
+*   **Client Flow**
+    1.  Client calls `GET /rooms` on any game server instance.
+    2.  Response includes all rooms across all machines (thanks to RedisDriver).
+    3.  Client filters by `metadata.buyInAmount`, `metadata.region`, etc.
+    4.  Client measures RTT by calling `GET /ping` on the target server.
+    5.  Client connects via WebSocket to the selected room.
+
+*   **Horizontal Scaling**
+    *   Bring up additional game server processes/machines, each configured with the same Redis URL.
+    *   RedisDriver automatically makes all rooms discoverable from any instance.
+    *   Load balancer can distribute client connections across instances.
 
 ### 2.6 Auth & Session Security
 **Role:** Make sure only Privy-authenticated wallets that have deposited into the selected server can ever reach gameplay, and that exit tickets cannot be forged or replayed.
@@ -213,49 +225,229 @@ graph TD
 *   **Contract Replay Protection**
     *   `exitedSessions[serverId][sessionId]` mapping prevents the same ticket from being claimed twice.
 
+### 2.8 Deposit Tracking & Join Eligibility
+**Role:** Ensure each deposit can only spawn one blob, and support reconnection if a player's entity is still alive.
+
+#### Deposit States
+
+A deposit has exactly two states:
+- **`unused`**: Exists on-chain (indexed), never used to spawn a blob
+- **`used`**: Was used to spawn a blob (permanent, one-time flag)
+
+There is no concept of "active session" vs "ended session" — once a deposit is used, it's used forever. Whether the resulting entity is alive, dead, or exited is a separate concern.
+
+#### Server Storage (Redis)
+
+```
+# Redis SET - contains all depositIds that have been used
+used_deposits:{serverId} = { depositId1, depositId2, ... }
+
+# Atomic operations:
+SISMEMBER used_deposits:{serverId} {depositId}  → boolean
+SADD used_deposits:{serverId} {depositId}       → marks as used (atomic)
+```
+
+*   Redis persistence (AOF/RDB) ensures used deposits survive server restarts.
+*   `SADD` is atomic, preventing race conditions from multiple browser tabs.
+
+#### Entity-Wallet Mapping
+
+To support reconnection, the game server tracks which wallet owns which living entity:
+
+```typescript
+// In-memory (GameRoom state)
+state.players: Map<sessionId, Player>
+// Player contains: wallet, blobs[], isAlive
+
+// Derived lookup:
+getEntityByWallet(wallet): Player | null  // Find living player by wallet
+```
+
+#### Join Eligibility Endpoint
+
+`GET /join-eligibility?serverId=X&wallet=Y`
+
+Returns one of:
+```typescript
+| { canJoin: true, action: 'reconnect', entityId: string }  // Entity alive, reconnect
+| { canJoin: true, action: 'spawn', depositId: string }     // Unused deposit found
+| { canJoin: false, reason: 'deposit_required' }            // No unused deposits
+```
+
+**Server logic:**
+```typescript
+async getJoinEligibility(serverId: string, wallet: string) {
+  // 1. Check if entity already exists (reconnect case)
+  const existingEntity = gameRoom.getEntityByWallet(wallet)
+  if (existingEntity && existingEntity.isAlive) {
+    return { canJoin: true, action: 'reconnect', entityId: existingEntity.sessionId }
+  }
+  
+  // 2. Get all deposits for this wallet (from indexer)
+  const deposits = await indexer.getPlayerDeposits(serverId, wallet)
+  
+  // 3. Find first unused deposit
+  for (const deposit of deposits) {
+    const isUsed = await redis.sismember(`used_deposits:${serverId}`, deposit.id)
+    if (!isUsed) {
+      return { canJoin: true, action: 'spawn', depositId: deposit.id }
+    }
+  }
+  
+  // 4. All deposits used (or none exist)
+  return { canJoin: false, reason: 'deposit_required' }
+}
+```
+
+#### Reconnect Support
+
+When a player disconnects (browser close, network issue), their entity is NOT immediately removed:
+
+1. **On disconnect:** Mark entity as `disconnected`, start timeout (e.g., 30 seconds)
+2. **During timeout:** Entity remains in world, can be eaten by other players
+3. **On reconnect:** If entity still alive, attach new client connection to existing entity
+4. **On timeout expire:** If entity still alive and no reconnect, treat as abandon (entity despawns, deposit stays "used")
+
+```typescript
+// GameRoom.onLeave
+async onLeave(client, consented) {
+  if (consented) {
+    // Player intentionally left — remove immediately
+    this.removePlayer(client.sessionId)
+  } else {
+    // Disconnect — keep entity alive for reconnect window
+    const player = this.state.players.get(client.sessionId)
+    if (player) {
+      player.isDisconnected = true
+      player.disconnectedAt = Date.now()
+    }
+  }
+}
+
+// In game loop: check for reconnect timeout
+if (player.isDisconnected && Date.now() - player.disconnectedAt > RECONNECT_TIMEOUT_MS) {
+  this.removePlayer(player.sessionId)  // Abandon — entity despawns
+}
+```
+
+#### Updated onJoin Flow
+
+```typescript
+async onJoin(client, options, auth) {
+  const { serverId, depositId, wallet, reconnect } = options
+  
+  // RECONNECT PATH
+  if (reconnect) {
+    const existingPlayer = this.getEntityByWallet(wallet)
+    if (existingPlayer && existingPlayer.isAlive && existingPlayer.isDisconnected) {
+      // Reconnect to existing entity
+      existingPlayer.isDisconnected = false
+      existingPlayer.sessionId = client.sessionId  // Rebind to new client
+      this.state.players.delete(existingPlayer.sessionId)
+      this.state.players.set(client.sessionId, existingPlayer)
+      client.userData = { wallet, depositId: existingPlayer.depositId, ... }
+      return
+    }
+    throw new Error('No entity to reconnect to')
+  }
+  
+  // SPAWN PATH
+  // 1. Verify deposit exists (from indexer)
+  const deposit = await verifyDeposit(serverId, depositId, wallet)
+  if (!deposit) throw new Error('Invalid deposit')
+  
+  // 2. Check deposit not already used (atomic)
+  const wasUsed = await redis.sismember(`used_deposits:${serverId}`, depositId)
+  if (wasUsed) throw new Error('Deposit already used')
+  
+  // 3. Mark as used (atomic — prevents race condition)
+  await redis.sadd(`used_deposits:${serverId}`, depositId)
+  
+  // 4. Spawn entity
+  // ... existing spawn logic ...
+}
+```
+
+#### Edge Cases
+
+| Scenario | Behavior |
+|----------|----------|
+| Two tabs try to use same deposit | First `SADD` wins, second gets "already used" error |
+| Server restarts | Redis persists used deposits set |
+| Player disconnects, entity eaten | Entity removed by eating logic, deposit stays "used" |
+| Player disconnects, reconnects | Reattach to existing entity if still alive |
+| Player disconnects, timeout | Entity despawns, deposit stays "used" |
+| Indexer lag (deposit not indexed yet) | Server returns "deposit not found", client retries |
+
 ---
 
 ## 3. Key Flows
 
 ### 3.1 Deposit & Verified Spawn
-This flow ensures deposits are tied to a specific server and cannot be replayed. The client gates everything behind Privy session + wallet auth, learns each server’s `{ serverId, status }` from the directory feed, and the Game Server refuses to spawn a player unless both the Privy token and the deposit for that exact `serverId` can be verified. Because rake and world shares are skimmed immediately, every player spawns at an intentional deficit and must hunt to get positive PnL.
+This flow ensures deposits are tied to a specific server and each deposit can only spawn one blob. The client first checks join eligibility, which handles both new spawns and reconnects. If an unused deposit exists, the server atomically marks it as used before spawning.
 
 ```mermaid
 sequenceDiagram
     participant User
     participant Client
-    participant Directory
     participant Contract
     participant Ponder
     participant Server
+    participant Redis
 
-    Note over User, Client: 1. Auth & Wallet Gating
+    Note over User, Client: 1. Auth & Check Eligibility
     Client->>Client: Ensure Privy session + wallet balance
     Client->>Privy: getAccessToken()
     Privy-->>Client: accessToken (JWT)
-    Client->>Client: client.auth.token = accessToken
-    Client->>Directory: GET /servers
-    Directory-->>Client: { serverId, status, bankrollHeadroom }
-    Note over Client: Directory metadata provides serverId + live health
+    Client->>Server: GET /join-eligibility?serverId=X&wallet=Y
+    Server->>Server: Check for existing entity (reconnect)
+    Server->>Ponder: getPlayerDeposits(serverId, wallet)
+    Ponder-->>Server: [deposits]
+    Server->>Redis: SISMEMBER used_deposits:{serverId} {depositId}
+    Redis-->>Server: false (unused)
+    Server-->>Client: { canJoin: true, action: 'spawn', depositId }
 
-    Note over User, Contract: 2. Financial Commitment
-    User->>Contract: deposit(serverId, 10 USDC)
-    Contract->>Contract: Split amount using per-server shares → `{ spawnMass, worldAmount, rakeAmount }`
-    Contract->>Ponder: Emit Deposit(user, spawnMass, worldAmount, rakeAmount, serverId, depositId)
-    Ponder->>Ponder: Index Event -> DB
-
-    Note over User, Server: 3. Game Entry
-    Client->>Server: joinOrCreate(serverId, { serverId, depositId, wallet }) + Bearer token
-    Server->>Server: onAuth(token) → verify Privy signature
-    Server->>Ponder: Query { deposit(serverId, depositId, wallet) }
-    Ponder-->>Server: Return { spawnMass: 9.5, exited: false }
-    
-    alt Deposit Valid & Unused
-        Server->>Server: Allocate sessionId, mark deposit as active
-        Server->>Client: Spawn Blob (Mass = 9.5 * MPD) + send sessionId
-    else Invalid/Reused
-        Server->>Client: Reject Connection
+    Note over User, Contract: 2. Deposit (if needed)
+    alt No unused deposit
+        User->>Contract: deposit(serverId) + ETH
+        Contract->>Ponder: Emit Deposit event
+        Ponder->>Ponder: Index → DB
+        Client->>Client: Extract depositId from tx logs
     end
+
+    Note over User, Server: 3. Join & Spawn
+    Client->>Server: joinOrCreate({ serverId, depositId, wallet }) + Bearer token
+    Server->>Server: onAuth(token) → verify Privy JWT
+    Server->>Ponder: verifyDeposit(serverId, depositId, wallet)
+    Ponder-->>Server: { spawnMass, ... }
+    Server->>Redis: SISMEMBER used_deposits:{serverId} {depositId}
+    Redis-->>Server: false
+    Server->>Redis: SADD used_deposits:{serverId} {depositId}
+    Note over Server,Redis: Atomic mark-as-used
+    Server->>Server: Spawn blob with spawnMass
+    Server-->>Client: Join success + entityId
+```
+
+### 3.1.1 Reconnect Flow
+If a player disconnects (browser close, network drop) but their entity is still alive, they can reconnect.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Client
+    participant Server
+    participant GameRoom
+
+    Note over User,Client: Player returns after disconnect
+    Client->>Server: GET /join-eligibility?serverId=X&wallet=Y
+    Server->>GameRoom: getEntityByWallet(wallet)
+    GameRoom-->>Server: { entityId, isAlive: true, isDisconnected: true }
+    Server-->>Client: { canJoin: true, action: 'reconnect', entityId }
+
+    Client->>Server: joinOrCreate({ serverId, wallet, reconnect: true })
+    Server->>GameRoom: Reattach client to existing entity
+    GameRoom->>GameRoom: player.isDisconnected = false
+    Server-->>Client: Join success, resume control of entity
 ```
 
 ### 3.2 Hold-to-Exit & Settlement
@@ -341,7 +533,7 @@ graph TD
     VirtualPool -->|Cap Limit| ActivePellets
 ```
 
-`massPerDollar` from the contract registry ensures every deposit’s `spawnMass` matches the physics economy. The indexer captures that value straight from the `Deposit` event, so the Virtual Pool can be reconciled against on-chain truth at any time.
+`massPerEth` from the contract registry ensures every deposit’s `spawnMass` matches the physics economy. The indexer captures that value straight from the `Deposit` event, so the Virtual Pool can be reconciled against on-chain truth at any time.
 
 ### 3.5 Homepage Session & Play CTA
 This diagram captures the full client-side decision tree from landing to spawning.
@@ -352,7 +544,6 @@ sequenceDiagram
     participant ClientApp
     participant Privy
     participant WalletRPC as Base RPC (viem/wagmi)
-    participant ServerDir as Server Directory API
     participant WorldContract
     participant GameServer
 
@@ -363,10 +554,10 @@ sequenceDiagram
         ClientApp->>User: Show Sign In button + disabled Play
     Else Session found
         Privy-->>ClientApp: { user, wallets }
-        ClientApp->>WalletRPC: getBalance(primaryWallet, USDC)
+        ClientApp->>WalletRPC: getBalance(primaryWallet, ETH)
         WalletRPC-->>ClientApp: balance
-        ClientApp->>ServerDir: GET /servers
-        ServerDir-->>ClientApp: [{ serverId, status, bankrollHeadroom, pingHint, buyInUSD }]
+        ClientApp->>GameServer: GET /rooms
+        GameServer-->>ClientApp: [{ serverId, status, bankrollHeadroom, pingHint, buyInAmount }]
         ClientApp->>Privy: getAccessToken()
         Privy-->>ClientApp: accessToken
         ClientApp->>ClientApp: cache accessToken + set client.auth.token
@@ -380,9 +571,9 @@ sequenceDiagram
         Alt Insufficient funds
             ClientApp->>User: Prompt Fund Wallet flow
         Else Has funds
-            ClientApp->>User: Confirm "$X will be deposited (after rake/world you spawn with Y mass)"
+            ClientApp->>User: Confirm "ΞX will be deposited (after rake/world you spawn with Y mass)"
             User-->>ClientApp: Confirm
-            ClientApp->>WorldContract: deposit(serverId, buyInUSD)
+            ClientApp->>WorldContract: deposit(serverId, buyInAmount)
             WorldContract-->>ClientApp: depositId
             ClientApp->>GameServer: joinOrCreate(serverId, { serverId, depositId, wallet }, Authorization: Bearer accessToken)
             GameServer-->>ClientApp: session accepted
@@ -414,52 +605,360 @@ stateDiagram-v2
     SignedOut --> SignedOut: cancelLogin
 ```
 
-### 3.7 Server Directory Sync
-The directory aggregates real-time state from every Colyseus server and exposes it to the overlay.
+### 3.7 Room Discovery Sync
+There is no standalone directory process anymore. Each Game Server instance:
 
-```mermaid
-sequenceDiagram
-    participant GameServer
-    participant RedisPresence
-    participant DirectorySvc
-    participant Postgres
-    participant ClientApp
-
-    GameServer->>RedisPresence: publish room lifecycle events
-    RedisPresence-->>DirectorySvc: event stream (create/join/leave/dispose)
-    DirectorySvc->>Postgres: upsert server + room stats
-    loop every 5s
-        DirectorySvc->>GameServer: health probe /metrics
-        GameServer-->>DirectorySvc: status payload (status, bankrollHeadroom, maxClients, pingHint, exitHoldMs)
-    end
-    ClientApp->>DirectorySvc: GET /servers?buyIn=X
-    DirectorySvc-->>ClientApp: filtered list (client selects default)
-```
+1. Publishes lifecycle + metadata updates into Redis Presence via `RedisDriver`.
+2. Exposes REST endpoints (`/rooms`, `/ping`, `/balances/current`) that read directly from Redis-backed `matchMaker.query()`.
+3. Serves all lobby UX needs. The client can hit any server to get the full federated list.
 
 ### 3.8 Bankroll Health Loop
-Without fixed rounds, solvency is managed continuously. Deposits top up each server’s bankroll, exits drain it, and the Directory throttles matchmaking when headroom falls below safety thresholds.
+Without fixed rounds, solvency is managed continuously. Deposits top up each server’s bankroll, exits drain it, and the Game Server’s own metadata signals to clients when a shard becomes “drained.”
 
 ```mermaid
 sequenceDiagram
     participant Contract
     participant Ponder
     participant GameServer
-    participant Directory
-
+    participant Client
+    
     User->>Contract: deposit(serverId, amount)
     Contract->>Ponder: Emit Deposit(...)
-    Ponder-->>GameServer: Deposit event (updates bankroll cache)
-    GameServer->>Directory: presence heartbeat { bankrollHeadroom }
-    Directory->>Directory: Mark server "Open" or "Drained" based on headroom
-
-    User->>Server: Hold-to-exit
-    Server->>Contract: exitWithSignature (via player wallet)
+    Ponder-->>GameServer: Deposit event (updates bankroll cache / BalanceSystem)
+    GameServer->>Redis: publish metadata { bankrollHeadroom }
+    Client->>GameServer: GET /rooms
+    GameServer-->>Client: metadata (including headroom + status flags)
+    
+    User->>GameServer: Hold-to-exit
+    User->>Contract: exitWithSignature (signed ticket)
     Contract->>Ponder: Emit Exit(serverId, sessionId, payout)
     Ponder-->>GameServer: Exit event (decrement bankroll)
-    GameServer->>Directory: heartbeat (reduced headroom)
-    alt Headroom < threshold
-        Directory->>Directory: status = "Drained", hide from CTA defaults
-    else Healthy
-        Directory->>Directory: status = "Open"
-    end
+    GameServer->>Redis: publish updated metadata
+    Client->>GameServer: refresh /rooms listing, hide “drained” shards locally
 ```
+
+---
+
+## 4. Game Rules & Mechanics
+
+This section defines the authoritative gameplay rules enforced by the Game Server. There are **no rounds**—the game runs continuously. Players deposit to spawn, hunt to grow, and hold spacebar to cash out.
+
+### 4.1 Core Loop
+
+1. **Deposit** → Player calls `deposit()` on-chain, then joins the Colyseus room.
+2. **Spawn** → Server verifies deposit via indexer and spawns a blob with mass proportional to the deposit (minus rake/world share).
+3. **Play** → Move toward cursor, eat pellets, eat smaller players, avoid larger players.
+4. **Exit or Die** →
+   - **Hold-to-Exit**: Hold spacebar to cash out current mass (see §2.3 for ticket flow).
+   - **Death**: Get eaten by a larger player → permanently eliminated. Must re-deposit to play again.
+
+### 4.2 Movement
+
+| Aspect | Rule |
+|--------|------|
+| **Input** | Client sends `{ x, y }` target position each tick. |
+| **Authority** | Server is fully authoritative; client only renders interpolated state. |
+| **Direction** | Blob accelerates toward the target position (cursor/touch). |
+| **Speed vs Mass** | Smaller blobs move faster. Max speed decreases smoothly as mass increases. |
+| **Friction** | Velocity is multiplied by `FRICTION` each tick, creating smooth deceleration. |
+
+**Speed Formula:**
+
+```
+maxSpeed = BASE_SPEED / (mass ^ SPEED_EXPONENT)
+maxSpeed = clamp(maxSpeed, MIN_SPEED, BASE_SPEED)
+```
+
+**Physics Update (per tick):**
+
+```
+// Direction toward cursor
+dx = targetX - blob.x
+dy = targetY - blob.y
+distance = sqrt(dx² + dy²)
+direction = (dx / distance, dy / distance)
+
+// Accelerate toward target
+blob.velocity += direction * ACCELERATION * deltaTime
+
+// Clamp to max speed
+speed = length(blob.velocity)
+if speed > maxSpeed:
+    blob.velocity = normalize(blob.velocity) * maxSpeed
+
+// Apply friction
+blob.velocity *= FRICTION
+
+// Update position
+blob.position += blob.velocity * deltaTime
+```
+
+Configurable constants: `BASE_SPEED`, `SPEED_EXPONENT`, `MIN_SPEED`, `FRICTION`.
+
+### 4.3 Size & Radius
+
+Blob radius scales with the square root of mass:
+
+```
+radius = RADIUS_SCALE * sqrt(mass)
+```
+
+This means doubling your mass increases your radius by ~41%, making you a bigger target but not proportionally larger.
+
+### 4.4 Eating Other Players
+
+Eating is determined by **radius**, not mass. This keeps visuals aligned with mechanics—especially important during hold-to-exit shrinking.
+
+A blob **A** can eat blob **B** if:
+
+1. **Radius Threshold**: `radiusA > radiusB * EAT_RADIUS_RATIO` (A's radius is at least 10% larger)
+   ```
+   radiusA > radiusB * 1.1
+   ```
+2. **Overlap Check**: Distance between centers is small enough that A engulfs B:
+   ```
+   distance(A, B) < radiusA - radiusB * EAT_OVERLAP_FACTOR
+   ```
+
+**On Successful Eat:**
+- Blob A gains **100%** of blob B's mass (mass transfer is still mass-based for economy).
+- Blob B is destroyed.
+- If B was a player, they are **permanently eliminated** and must re-deposit to spawn again.
+
+**Why Radius?**
+During hold-to-exit, a blob's radius shrinks while mass is preserved (for payout calculation). Using radius for eat checks means a shrinking blob becomes vulnerable even though its underlying mass hasn't changed—adding real risk to the exit attempt.
+
+### 4.5 Pellets
+
+| Aspect | Rule |
+|--------|------|
+| **Mass** | Fixed: `PELLET_MASS` (configurable, e.g., 1) |
+| **Spawn** | Server spawns pellets continuously up to `MAX_PELLETS` cap. |
+| **Eating** | When a blob overlaps a pellet, the blob gains `PELLET_MASS` and the pellet is removed. |
+| **Economy** | Pellet value is drawn from the World Pool. Uneaten pellets represent unclaimed value that remains in the pool. |
+
+### 4.6 Splitting
+
+Players can **split** their blob into two smaller blobs for aggressive plays.
+
+| Aspect | Rule |
+|--------|------|
+| **Trigger** | Player presses split key/button. |
+| **Mass Division** | Blob of mass `m` splits into two blobs of mass `m/2` each. |
+| **Velocity Burst** | One child blob is launched forward with a speed burst in the direction of the cursor. |
+| **Max Blobs** | A player can control at most `MAX_BLOBS` (e.g., 4) blobs simultaneously. Split is blocked if at cap. |
+| **Cooldown** | Cannot split again for `SPLIT_COOLDOWN_MS` after a split. |
+| **Minimum Mass** | Cannot split if resulting blobs would be below `MIN_SPLIT_MASS`. |
+
+### 4.7 Merging & Attraction
+
+After splitting, a player's blobs are magnetically attracted toward their shared center of mass. The attraction force **scales with merge timer progress**—weak at first, strong as the merge window approaches—creating a smooth "coming back together" feel.
+
+#### Attraction Logic
+
+All blobs belonging to the same player are pulled toward the player's **center of mass**:
+
+```
+// Compute player's center of mass
+totalMass = sum(blob.mass for blob in player.blobs)
+centerX = sum(blob.x * blob.mass for blob in player.blobs) / totalMass
+centerY = sum(blob.y * blob.mass for blob in player.blobs) / totalMass
+```
+
+Each tick, apply an attraction force toward that center:
+
+```
+for each blob in player.blobs:
+    dx = centerX - blob.x
+    dy = centerY - blob.y
+    distance = sqrt(dx² + dy²)
+    
+    if distance < MIN_ATTRACT_DISTANCE:
+        continue  // Avoid jitter when very close
+    
+    direction = (dx / distance, dy / distance)
+    
+    // Timer progress: 0 (just split) → 1 (ready to merge)
+    timerProgress = clamp(blob.timeSinceSplit / RECOMBINE_TIME_MS, 0, 1)
+    
+    // Attraction strength scales with timer progress
+    attractStrength = MAGNET_BASE_FORCE + (MAGNET_MAX_FORCE - MAGNET_BASE_FORCE) * timerProgress
+    
+    // Optional: also scale with distance (spring-like)
+    force = min(attractStrength * distance, MAGNET_MAX_FORCE)
+    
+    blob.velocity += direction * force * deltaTime
+```
+
+**Key behaviors:**
+- **Just after split**: Blobs fly apart from the split burst, attraction is weak (or zero if `MAGNET_BASE_FORCE = 0`).
+- **Mid-timer**: Blobs drift back together, forming a loose pack around the player's movement.
+- **Near merge time**: Strong pull keeps blobs close, ready to merge the moment they're eligible.
+
+#### Soft Collision (Pre-Merge)
+
+While the merge timer is active, same-player blobs **cannot overlap**. A soft repulsion prevents them from merging prematurely:
+
+```
+for each pair (blobA, blobB) where blobA.owner == blobB.owner:
+    if blobA.canMerge AND blobB.canMerge:
+        continue  // Allow overlap, they'll merge
+    
+    dx = blobB.x - blobA.x
+    dy = blobB.y - blobA.y
+    distance = sqrt(dx² + dy²)
+    minDistance = blobA.radius + blobB.radius
+    
+    if distance < minDistance:
+        // Push apart proportionally
+        overlap = minDistance - distance
+        pushDir = (dx / distance, dy / distance)
+        pushForce = overlap * SOFT_COLLISION_FORCE
+        
+        // Mass-weighted: lighter blob moves more
+        totalMass = blobA.mass + blobB.mass
+        blobA.velocity -= pushDir * pushForce * (blobB.mass / totalMass)
+        blobB.velocity += pushDir * pushForce * (blobA.mass / totalMass)
+```
+
+#### Merge Trigger
+
+| Aspect | Rule |
+|--------|------|
+| **Eligibility** | Both blobs have `timeSinceSplit >= RECOMBINE_TIME_MS`. |
+| **Overlap** | Distance between centers < `(radiusA + radiusB) * MERGE_OVERLAP_FACTOR`. |
+| **Execution** | Smaller blob is absorbed into larger. Combined mass, weighted center position. |
+
+```
+// On merge
+survivor = massA > massB ? blobA : blobB
+absorbed = massA > massB ? blobB : blobA
+
+survivor.mass = blobA.mass + blobB.mass
+survivor.x = (blobA.x * blobA.mass + blobB.x * blobB.mass) / survivor.mass
+survivor.y = (blobA.y * blobA.mass + blobB.y * blobB.mass) / survivor.mass
+survivor.radius = RADIUS_SCALE * sqrt(survivor.mass)
+survivor.timeSinceSplit = 0  // Reset merge timer
+
+remove(absorbed)
+```
+
+#### Tuning Parameters
+
+| Constant | Default | Description |
+|----------|---------|-------------|
+| `MAGNET_BASE_FORCE` | 0 | Attraction strength immediately after split (0 = none) |
+| `MAGNET_MAX_FORCE` | 50 | Attraction strength at full timer progress |
+| `MIN_ATTRACT_DISTANCE` | 10 | Don't apply attraction when closer than this (prevents jitter) |
+| `SOFT_COLLISION_FORCE` | 100 | Push-apart strength for pre-merge blob overlap |
+| `MERGE_OVERLAP_FACTOR` | 0.3 | How much blobs must overlap to merge (0.3 = centers within 30% of combined radii) |
+
+### 4.8 Eject Mass
+
+Players can eject small pieces of mass.
+
+| Aspect | Rule |
+|--------|------|
+| **Trigger** | Player presses eject key/button. |
+| **Ejected Amount** | Fixed: `EJECT_MASS` is removed from the blob. |
+| **Projectile** | A pellet-like mass projectile is launched in the cursor direction. |
+| **Pickup** | Ejected mass can be eaten by any blob (including enemies). |
+| **Uses** | Feed teammates, bait enemies, shed mass to speed up. |
+| **Cooldown** | `EJECT_COOLDOWN_MS` between ejects. |
+| **Minimum Mass** | Cannot eject if blob mass would drop below `MIN_EJECT_MASS`. |
+
+### 4.9 Death
+
+When a player's blob is eaten:
+
+- All of that blob's mass is transferred to the eater.
+- If the player has multiple blobs (from splitting), only the eaten blob is destroyed.
+- If the player's **last blob** is eaten, they are **permanently eliminated**.
+- Eliminated players must **re-deposit** on-chain to spawn again.
+
+There is no respawn, no grace period, no second chances within a session.
+
+### 4.10 Hold-to-Exit (Cash Out)
+
+See §2.3 and §3.2 for the full exit flow. Summary:
+
+1. Player holds **spacebar** continuously.
+2. Server starts `exitHoldMs` countdown; blob enters "exiting" state.
+3. If spacebar is released or blob dies, exit is cancelled.
+4. If countdown completes, blob is despawned and server issues a signed `ExitTicket`.
+5. Player submits ticket on-chain to withdraw payout.
+
+**Exiting State Behavior:**
+
+While holding to exit, the blob is penalized to create risk:
+
+| Effect | Behavior |
+|--------|----------|
+| **Slowdown** | Movement speed is reduced by `EXIT_SPEED_PENALTY` (e.g., 50%). The blob becomes sluggish and harder to maneuver. |
+| **Shrinking** | Blob radius shrinks over the hold duration toward `EXIT_MIN_RADIUS_FACTOR` of its original size (e.g., shrinks to 60% radius). |
+| **Vulnerability** | Because eating uses radius (§4.4), a shrinking blob becomes edible by smaller opponents. |
+| **Mass Preserved** | Underlying mass is unchanged—payout is calculated from mass at exit start, not the shrunk visual. |
+
+**Shrink Formula:**
+
+```
+elapsedRatio = elapsed / exitHoldMs          // 0 → 1 over the hold
+shrinkProgress = elapsedRatio * (1 - EXIT_MIN_RADIUS_FACTOR)
+currentRadius = originalRadius * (1 - shrinkProgress)
+```
+
+At full hold completion, `currentRadius = originalRadius * EXIT_MIN_RADIUS_FACTOR`.
+
+**Cancellation:**
+
+If the player releases spacebar or gets eaten mid-hold:
+- Radius instantly snaps back to normal (`RADIUS_SCALE * sqrt(mass)`).
+- Speed returns to normal.
+- No exit ticket is issued.
+- Gameplay resumes normally.
+
+### 4.11 Game Configuration
+
+All tunable constants are defined in server config. Example defaults:
+
+| Constant | Default | Description |
+|----------|---------|-------------|
+| **World & Tick** |||
+| `TICK_RATE` | 20 | Server simulation ticks per second |
+| `WORLD_WIDTH` | 4000 | World bounds (pixels) |
+| `WORLD_HEIGHT` | 4000 | World bounds (pixels) |
+| **Movement** |||
+| `BASE_SPEED` | 300 | Base/max movement speed for smallest blobs |
+| `SPEED_EXPONENT` | 0.45 | How aggressively speed decreases with mass |
+| `MIN_SPEED` | 50 | Speed floor for massive blobs |
+| `ACCELERATION` | 600 | How quickly blobs accelerate toward cursor |
+| `FRICTION` | 0.92 | Velocity multiplier per tick (1 = no friction) |
+| **Size & Eating** |||
+| `RADIUS_SCALE` | 4 | Multiplier for `sqrt(mass)` → radius |
+| `EAT_RADIUS_RATIO` | 1.1 | Radius must be this multiple to eat (10% larger) |
+| `EAT_OVERLAP_FACTOR` | 0.4 | How much smaller blob must be inside larger |
+| **Pellets** |||
+| `PELLET_MASS` | 1 | Mass per pellet |
+| `MAX_PELLETS` | 1000 | Maximum pellets on map |
+| `PELLET_SPAWN_RATE` | 10 | Pellets spawned per second |
+| **Splitting** |||
+| `MAX_BLOBS` | 4 | Max blobs per player |
+| `SPLIT_COOLDOWN_MS` | 500 | Cooldown between splits |
+| `MIN_SPLIT_MASS` | 36 | Minimum mass to split |
+| `SPLIT_BOOST` | 400 | Velocity burst on split |
+| **Merging & Attraction** |||
+| `RECOMBINE_TIME_MS` | 30000 | Time before blobs can merge |
+| `MAGNET_BASE_FORCE` | 0 | Attraction strength immediately after split |
+| `MAGNET_MAX_FORCE` | 50 | Attraction strength at full timer progress |
+| `MIN_ATTRACT_DISTANCE` | 10 | Don't apply attraction closer than this |
+| `SOFT_COLLISION_FORCE` | 100 | Push-apart strength for pre-merge overlap |
+| `MERGE_OVERLAP_FACTOR` | 0.3 | How much blobs must overlap to merge |
+| **Eject Mass** |||
+| `EJECT_MASS` | 16 | Mass ejected per action |
+| `EJECT_COOLDOWN_MS` | 100 | Cooldown between ejects |
+| `MIN_EJECT_MASS` | 32 | Minimum mass to eject |
+| `EJECT_SPEED` | 500 | Velocity of ejected mass |
+| **Hold-to-Exit** |||
+| `EXIT_HOLD_MS` | 3000 | Duration player must hold to cash out |
+| `EXIT_SPEED_PENALTY` | 0.5 | Speed multiplier while exiting (50% = half speed) |
+| `EXIT_MIN_RADIUS_FACTOR` | 0.6 | Radius shrinks to this factor at full hold (60%) |
