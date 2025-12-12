@@ -1,6 +1,7 @@
 import config from "@colyseus/tools";
 import { RedisPresence } from "@colyseus/redis-presence";
 import { RedisDriver } from "@colyseus/redis-driver";
+import { monitor } from "@colyseus/monitor";
 import { matchMaker } from "colyseus";
 import express from "express";
 import { config as envConfig } from "./config.js";
@@ -51,6 +52,11 @@ export default config({
   initializeExpress: (app) => {
     // Parse JSON bodies
     app.use(express.json({ limit: "100kb" }));
+
+    // Colyseus monitor (dev-only): view rooms and inspect live room state.
+    if (envConfig.nodeEnv !== "production") {
+      app.use("/monitor", monitor());
+    }
 
     // Health check endpoint
     app.get("/healthz", (_req, res) => {

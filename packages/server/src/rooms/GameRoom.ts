@@ -713,34 +713,19 @@ export class GameRoom extends Room<GameState> {
       updatePlayerMass(player);
     });
 
-    // 10. Check for reconnect timeouts
-    this.checkReconnectTimeouts();
+    // 10. Reconnect timeout handling disabled:
+    // If a player's blob persists in the world, they should always be able
+    // to reconnect later and regain control.
   }
 
   /**
    * Check for disconnected players that have exceeded the reconnect timeout
    */
   private checkReconnectTimeouts() {
-    const now = Date.now();
-    const playersToRemove: string[] = [];
-
-    this.state.players.forEach((player, sessionId) => {
-      const isDisconnected = (player as any).isDisconnected;
-      const disconnectedAt = (player as any).disconnectedAt || 0;
-
-      if (isDisconnected && disconnectedAt > 0) {
-        const elapsed = now - disconnectedAt;
-        if (elapsed > GAME_CONFIG.RECONNECT_TIMEOUT_MS) {
-          console.log(`Player ${sessionId} reconnect timeout expired, removing entity`);
-          playersToRemove.push(sessionId);
-        }
-      }
-    });
-
-    // Remove timed-out players
-    for (const sessionId of playersToRemove) {
-      this.removePlayer(sessionId);
-    }
+    // Intentionally disabled.
+    // We keep disconnected entities indefinitely (they can still be eaten),
+    // and allow the owning wallet to reconnect at any time if the entity
+    // remains alive.
   }
 
   private creditWorldShare(deposit: Deposit) {

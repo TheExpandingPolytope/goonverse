@@ -12,6 +12,7 @@
   "dependencies": {
     "@colyseus/redis-driver": "^0.16.0",
     "@colyseus/redis-presence": "^0.16.0",
+    "@colyseus/monitor": "^0.16.0",
     "@colyseus/tools": "^0.16.0",
     "@privy-io/server-auth": "^1.17.0",
     "colyseus": "^0.16.0",
