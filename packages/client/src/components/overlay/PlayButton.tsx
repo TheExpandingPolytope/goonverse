@@ -52,8 +52,6 @@ export const PlayButton = ({ servers }: PlayButtonProps) => {
     return servers[0] ?? null
   }, [servers, selectedServerId])
 
-  console.log("servers", servers);
-
   // Buy-in from selected server
   const buyInEth = selectedServer?.buyInEth ?? 0
 

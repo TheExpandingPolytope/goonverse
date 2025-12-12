@@ -54,7 +54,7 @@ graph TD
 *   **Economy Parameters (per `serverId`):**
 *   `massPerEth`: deterministic conversion between spawned mass and one ETH-equivalent unit for that shard (we keep the scalar for gameplay tuning).
     *   `rakeShareBps` / `worldShareBps`: basis-point splits used to route value to the developer and the shared world pool. Whatever remains becomes the playable spawn budget (escrowed in `serverBankroll[serverId]`).
-    *   `exitHoldMs`: milliseconds a player must hold spacebar to successfully cash out; tunable per server to balance risk/reward.
+    *   `exitHoldMs`: milliseconds a player must hold the **exit key (Q)** to successfully cash out; tunable per server to balance risk/reward. On the wire this is modeled as a boolean field in the input payload (historically named `spacebar`).
 
 *   **Write Interfaces (all scoped by `serverId`):**
 *   `deposit(bytes32 serverId) payable`: User funds a session with ETH. The contract splits `msg.value` into `{ spawnAmount, worldAmount, rakeAmount }`, transfers rake/world shares immediately, credits `serverBankroll[serverId] += spawnAmount`, and emits `Deposit(player, spawnAmount, worldAmount, rakeAmount, serverId, depositId)`.
@@ -92,7 +92,9 @@ graph TD
 **Role:** Physics, State Sync, Pellet Spawning, Session Verification.
 
 *   **WebSocket Messages:**
-    *   `input`: { x, y, spacebar } — movement vectors plus spacebar state from client. Sustained `spacebar: true` triggers the exit hold countdown.
+    *   `input`: `{ x, y, exitHold, split }` — movement vectors plus two booleans:
+        *   `exitHold`: whether the **exit key (Q)** is currently held (sustained `exitHold: true` triggers the exit hold countdown).
+        *   `split`: whether the **split key (Spacebar)** was just pressed (single-tick edge trigger to initiate a split).
 *   **Internal Logic:**
     *   `static async onAuth(token, options, context)`: Uses the Privy verification key to validate the bearer token provided by the client (`context.token`) before the room spins up; rejects immediately on invalid/expired tokens.
     *   `onJoin(client, options, auth)`: Called only after `onAuth` succeeds; validates `{ serverId, depositId, wallet }` via Ponder to ensure the user deposited for this shard and that the deposit hasn’t been fully exited. Issues a `sessionId`, records spawn mass, and binds `auth` (verified Privy claims) to the physics entity.
@@ -107,8 +109,13 @@ graph TD
     *   `update()`: Runs physics loop (`TICK_RATE` Hz), processes movement, collision detection, eating logic, and exit hold progression. See §4 for full game rules.
 *   `presenceHeartbeat()`: Publishes `{ serverId, status, players, exitHoldMs, bankrollHeadroom }` into Redis Presence so `/rooms` responses and ops dashboards stay synchronized.
 
-### 2.4 Client (`RootApp.tsx`)
+### 2.4 Client (`packages/client`)
 **Role:** The full game client (canvas + UI shell). Orchestrates identity, wallet balance checks, direct server discovery (via `/rooms`), and the "Play" CTA before handing control to the Colyseus room.
+
+The concrete implementation lives under `packages/client`:
+
+- `src/main.tsx` – bootstraps the React app and wraps it in `PrivyProvider`, `WagmiProvider`, `GameClientProvider`, and `UIProvider`.
+- `src/App.tsx` – top-level UI shell that composes the world canvas (`World`) and overlay UI (`Overlay`).
 
 #### Frontend Implementation Stack
 
@@ -116,14 +123,16 @@ graph TD
 |-------|------------|-------|
 | Rendering / Game View | **Canvas API + TypeScript** | The gameplay surface is a plain `<canvas>` managed via low-level Canvas 2D APIs for predictable performance. TypeScript typings wrap the canvas helpers (stroke/fill, off-screen buffers, etc.) so physics projections line up with the Colyseus state schema. |
 | UI Shell | **React 18** | All overlay UX (lobby, HUD, modals) lives in React components. React Context provides a shared store between the canvas renderer and UI widgets for things like exit-status, pellet counts, or latency warnings. |
-| Design System | **shadcn/ui** | Buttons, dialogs, form controls, and toasts are pulled from shadcn/ui (tailwind-agnostic headless components) to keep styling consistent. We wrap shadcn primitives with project-specific themes and animation tokens. |
-| Realtime Networking | **`colyseus.js` client** | React hooks call `client.joinOrCreate("game")`, hydrate the read-only Schema proxies, and subscribe via `getStateCallbacks`. All outbound input uses the Colyseus reliable message channel (`room.send("input", payload)`). |
-| Auth / Wallet | **Privy SDK (`@privy-io/react-auth`)** | The navbar hosts Privy’s auth widget. After login, we call `getAccessToken()` and set `client.auth.token`. Privy’s hooks provide `linkedWallets`, and we route `depositId` + wallet into the Colyseus join payload. |
+| Design System | **Custom CSS + simple components** | The current implementation uses a lightweight, custom-styled overlay rather than a full shadcn-based design system. This can be swapped for shadcn/ui in the future without changing the canvas API. |
+| Realtime Networking | **`colyseus.js` client** | React hooks call `client.joinOrCreate("game")`, hydrate the read-only Schema proxies, and subscribe to state change callbacks. All outbound input uses the Colyseus reliable message channel (`room.send("input", payload)`). |
+| Auth / Wallet | **Privy SDK (`@privy-io/react-auth`) + wagmi/viem** | The overlay hosts Privy’s auth widget. After login, we call `getAccessToken()` and set `client.auth.token`. Privy’s hooks provide `linkedWallets`, and we route `depositId` + wallet into the Colyseus join payload. |
 
-Key files:
-1. `apps/web/src/providers/GameClientProvider.tsx` – bootstraps the Colyseus client, exposes hooks for state + mutations.
-2. `apps/web/src/components/canvas/GameCanvas.tsx` – pure TypeScript canvas renderer, listening to Schema diffs and drawing blobs/pellets every animation frame.
-3. `apps/web/src/components/ui/*` – shadcn-based components used across lobby + overlays.
+Key files (client):
+1. `packages/client/src/providers/GameClientProvider.tsx` – bootstraps and caches the Colyseus client, exposes join/leave helpers and session phase.
+2. `packages/client/src/world/World.tsx` – React host for the `<canvas>` element; wires the renderer and input layer to the game client context.
+3. `packages/client/src/world/renderer.ts` – pure TypeScript canvas renderer, reading a view-model of the game state and drawing blobs/pellets every animation frame.
+4. `packages/client/src/world/input.ts` – attaches browser input listeners to the canvas and forwards normalized input events to the game server.
+5. `packages/client/src/components/overlay/PlayButton.tsx` – orchestrates auth, funding, deposit, join eligibility, and finally calls `joinGame` on the `GameClientProvider`.
 
 *   **Auth & Identity**
     *   On page load, call Privy to hydrate `authState`. Maintain `session`, `user`, `linkedWallets`.
@@ -143,15 +152,166 @@ Key files:
     *   After the deposit transaction is accepted, the client issues the Colyseus `joinOrCreate` request with `{ serverId, depositId, wallet }`, includes the Privy access token as the Colyseus auth header, and collapses the pre-game UI once the server verifies the deposit with the indexer.
     *   Because there's no round gating, availability depends on bankroll headroom; servers that fall below a threshold are marked “Drained” and the CTA nudges users toward healthier shards.
 *   **Hold-to-Exit UX**
-    *   Exit is triggered by holding the **spacebar** (same input channel as gameplay). When the server detects sustained spacebar input, it starts the exit countdown (`exitHoldMs`, configurable per server). The UI renders a progress ring over the blob.
+    *   Exit is triggered by holding the **Q key**. When the server detects sustained `exitHold: true` in the input stream, it starts the exit countdown (`exitHoldMs`, configurable per server). The UI renders a progress ring over the blob.
     *   **Blob behavior during hold:** Speed is reduced by `EXIT_SPEED_PENALTY` and radius shrinks toward `EXIT_MIN_RADIUS_FACTOR` over the hold duration. The shrinking makes the blob vulnerable to being eaten by smaller opponents (see §4.10).
     *   If spacebar is released or the blob dies, the exit is cancelled and normal gameplay resumes.
     *   Once the hold completes, the server **despawns the blob, closes the session**, and issues an `ExitTicket`. The ticket is persisted server-side (Redis) and sent to the client in the session-close payload. The UI stores the ticket in `localStorage` as backup and immediately prompts the wallet for `exitWithSignature()`.
     *   If the browser closes before the tx lands, the client checks `localStorage` on next load and/or calls `GET /sessions/pending-exits` (Privy-auth-gated) to retrieve any unclaimed tickets.
     *   Tickets have a generous expiry (e.g., 24h). If unclaimed by expiry, the reservation is released back to bankroll and the payout is forfeited.
 *   **Game Canvas Integration**
-    *   The UI shell communicates with the canvas via a shared context/store (`GameClientProvider`), allowing overlays (deposit form, exit hold overlay, post-exit summary) to toggle without reloading the WebGL scene.
-    *   When the player exits/disconnects, the lobby shell re-opens and re-fetches balances, session history, and leaderboard stats to keep the experience fresh.
+    *   The UI shell communicates with the canvas via a shared context/store (`GameClientProvider`). The provider owns the Colyseus `Client`/`Room`, exposes helpers to join/leave, and (in its final form) will expose a read-only "latest game state" snapshot plus a `sendInput(payload)` function for the canvas layer.
+    *   The `World` React component is intentionally thin: it renders a single `<canvas>` and, on mount, bootstraps two pure TypeScript modules:
+        *   `bootstrapRenderer(canvas, getViewModel)` from `world/renderer.ts` – a render loop that reads a **view model** of the game (`WorldViewModel`) every animation frame and draws pellets, blobs, and HUD using the Canvas 2D API.
+        *   `attachInputListeners(canvas, controller)` from `world/input.ts` – attaches pointer/keyboard listeners and forwards normalized events into a controller interface.
+    *   A small adapter layer in `world/adapters.ts` connects the game client to the canvas APIs:
+        *   It pulls the latest Colyseus `GameState` snapshot and derives a camera-centric `WorldViewModel` (local player position, visible pellets/players, exit-hold status, etc.) consumed by the renderer.
+        *   It implements a `WorldInputController` interface with methods like `onPointerMove({ x, y })`, `onSpaceDown()`, and `onSpaceUp()`. These update transient client-side input state and send `{ x, y, spacebar }` messages via `room.send("input", payload)` at a throttled rate.
+    *   This separation keeps the canvas layer framework-agnostic (no React imports in `renderer.ts` or `input.ts`) and makes it easy to test or swap rendering tech (e.g., to WebGL) without touching the lobby/overlay React components.
+    *   When the player exits/disconnects, the lobby shell re-opens and re-fetches balances, session history, and leaderboard stats to keep the experience fresh, while the canvas is torn down and its event listeners/animation loop are fully cleaned up.
+
+#### 2.4.1 `World` Component Frame Lifecycle
+
+**High-level role**
+
+- `World` is a thin React wrapper around a `<canvas>` element.
+- It does **not** contain game logic; instead, it:
+  - Wires the canvas to the **game client context** (`GameClientProvider`).
+  - Boots a **renderer loop** (`bootstrapRenderer`) that draws each frame based on authoritative game state.
+  - Boots an **input layer** (`attachInputListeners`) that translates browser events into `ClientInput` messages sent to the game server.
+- The **physical exit key** is **Q**. On the wire this is represented as the `spacebar` boolean in `{ x, y, spacebar }` (i.e. “exit button held”), but no actual keyboard spacebar is used during gameplay.
+
+**On mount (React effect)**
+
+1. **Resolve game client context**
+   - `World` calls a hook (e.g. `useGameClientContext` / `useGameSession`) to access:
+     - `room`: the current Colyseus room (if joined).
+     - `getStateSnapshot(): GameState | null`: returns the latest authoritative schema snapshot (or `null` if not in-game).
+     - `sendInput(input: ClientInput): void`: wraps `room.send("input", input)` and no-ops if `room` is `null`.
+
+2. **Create world adapter**
+   - `World` constructs an adapter from `world/adapters.ts`, for example:
+     - `const adapter = createWorldAdapter({ getStateSnapshot, sendInput })`.
+   - The adapter exposes:
+     - `getViewModel(): WorldViewModel | null` – converts the authoritative `GameState` into a camera‑centric view model for rendering.
+     - `controller: WorldInputController` – small object with methods:
+       - `onPointerMove({ x, y })`
+       - `onExitKeyDown()`  // user pressed Q
+       - `onExitKeyUp()`    // user released Q
+     - Internally, the controller:
+       - Tracks the latest cursor target position.
+       - Tracks whether the **exit key (Q)** is currently held.
+       - At a throttled rate, calls `sendInput({ x, y, spacebar })`, where `spacebar` encodes “Q is currently held”.
+
+3. **Bootstrap renderer**
+   - `World` grabs the `canvas` ref (`useRef<HTMLCanvasElement>()`) once it’s in the DOM.
+   - It calls `const cleanupRenderer = bootstrapRenderer(canvas, adapter.getViewModel)`.
+   - Inside `bootstrapRenderer(canvas, getViewModel)`:
+     - Sets `canvas.width` / `canvas.height` from the window size and attaches a `resize` listener.
+     - Defines a `render()` function and kicks off the loop with `requestAnimationFrame(render)`.
+
+4. **Attach input listeners**
+   - `World` wires input via:
+     - `const cleanupInput = attachInputListeners(canvas, adapter.controller)`.
+   - Inside `attachInputListeners(canvas, controller)`:
+     - Registers `pointermove` / `mousemove` to track cursor position relative to the canvas:
+       - Computes normalized coordinates:
+         - \( x = (clientX - canvasRect.left) / canvasRect.width \)
+         - \( y = (clientY - canvasRect.top) / canvasRect.height \)
+       - Calls `controller.onPointerMove({ x, y })`.
+     - Registers `keydown` / `keyup` for the **exit key (Q)**:
+       - On `keydown` where `event.code === "KeyQ"` → `controller.onExitKeyDown()`.
+       - On `keyup` where `event.code === "KeyQ"` → `controller.onExitKeyUp()`.
+
+5. **Cleanup on unmount**
+   - When `World` unmounts:
+     - `cleanupInput()` removes all event listeners.
+     - `cleanupRenderer()` cancels `requestAnimationFrame` and the `resize` listener.
+
+**Per-frame behavior inside `bootstrapRenderer`**
+
+All per‑frame work happens inside the renderer loop; React is not involved.
+
+1. **Read view model**
+   - Each `render()` call does `const view = getViewModel()`.
+   - If `view === null`:
+     - Clears the canvas.
+     - Draws a neutral background (e.g. dim fill or simple grid).
+     - Schedules the next frame and returns.
+   - Otherwise, `view` includes:
+     - `camera`: world‑space camera center/zoom (typically centered on local player blobs).
+     - `playerBlobs`: local blobs with `position`, `radius`, `mass`, `status` (normal vs exiting).
+     - `otherBlobs`: visible opponent blobs.
+     - `pellets`: visible pellets.
+     - `worldBounds`: map bounds.
+     - `hud`: HUD data such as current mass, payout estimate, `exitHoldProgress` (0→1), ping, etc.
+
+2. **Prepare canvas**
+   - Gets the 2D context and clears the viewport.
+   - Computes world→screen transform from `view.camera`:
+     - Translation so the camera center maps to the canvas center.
+     - Scale factor for zoom (smaller blobs zoomed in more, larger blobs zoomed out).
+
+3. **Draw background and bounds**
+   - Calls something like `drawBackground(ctx, view.worldBounds, cameraTransform)`:
+     - Fills background color/gradient.
+     - Draws world border and optional grid lines.
+
+4. **Draw pellets**
+   - Calls `drawPellets(ctx, view.pellets, cameraTransform)`:
+     - For each pellet, transforms its world position to canvas coordinates.
+     - Draws a small filled circle for each pellet.
+
+5. **Draw blobs**
+   - Calls `drawBlobs(ctx, view.playerBlobs, view.otherBlobs, cameraTransform)`:
+     - Draws `otherBlobs` first, then `playerBlobs` on top.
+     - For each blob:
+       - Transforms center + radius to screen space and draws a circle with fill + outline.
+     - For **exiting** blobs (those currently holding Q / `spacebar: true` on the server):
+       - Uses a visually shrunk radius based on `exitHoldProgress`.
+       - Applies a special outline or pulsing effect to signal vulnerability.
+
+6. **Draw HUD / overlays**
+   - Calls `drawHUD(ctx, view.hud)`:
+     - Renders screen-space text (e.g. top-left) for:
+       - Current mass.
+       - Payout estimate if exit completes now.
+       - Room/server name, ping.
+     - If `exitHoldProgress > 0`:
+       - Draws a **circular progress ring** around the local player’s primary blob or at a fixed HUD position.
+       - The arc angle is proportional to `exitHoldProgress` (0 → 1 over `exitHoldMs`).
+
+7. **Schedule next frame**
+   - At the end of `render()`:
+     - Calls `requestAnimationFrame(render)` to keep the loop going.
+
+**Per-input behavior via `attachInputListeners` + `WorldInputController`**
+
+1. **Pointer move**
+   - Browser emits `pointermove`/`mousemove`.
+   - `attachInputListeners`:
+     - Normalizes coordinates into canvas space: `(nx, ny)`.
+     - Calls `controller.onPointerMove({ x: nx, y: ny })`.
+   - The controller:
+     - Updates its local `targetX`, `targetY`.
+     - At a throttle interval (e.g. max 60 Hz), sends:
+       - `sendInput({ x: worldX, y: worldY, spacebar: isExitKeyHeld })`
+       - where `isExitKeyHeld` reflects whether **Q** is held.
+
+2. **Exit key (Q) hold / release**
+   - On `keydown` `"KeyQ"`:
+     - `attachInputListeners` calls `controller.onExitKeyDown()`.
+     - The controller sets `isExitKeyHeld = true` and immediately sends a `ClientInput` with current target position and `spacebar: true`.
+   - On `keyup` `"KeyQ"`:
+     - `attachInputListeners` calls `controller.onExitKeyUp()`.
+     - The controller sets `isExitKeyHeld = false` and sends another `ClientInput` with `spacebar: false` to cancel the hold on the server.
+
+3. **Focus / visibility**
+   - On `window.blur` or `visibilitychange`:
+     - The input layer may treat this as an implicit `onExitKeyUp()` and stop movement/exit updates to avoid “stuck” exits when the tab loses focus.
+   - When `World` unmounts:
+     - All listeners are removed and the controller state is discarded; a new `World` mount + join will recreate fresh wiring.
+
+This lifecycle ensures that each visual frame is driven by the **latest authoritative game state** (read-only), while input events flow in the opposite direction through a narrow `ClientInput` API to the game server.
 
 ### 2.5 Room Discovery & Lobby Feed
 **Role:** Provide the homepage with real-time knowledge of every Colyseus room across all game server instances.
@@ -463,9 +623,9 @@ sequenceDiagram
     participant Ponder
     participant Wallet
 
-    Note over User, Client: 1. Player holds spacebar
-    Client->>Server: input { spacebar: true } (sustained)
-    Server->>Server: Detect sustained spacebar, start exitHoldMs countdown
+    Note over User, Client: 1. Player holds exit key (Q)
+    Client->>Server: input { exitHold: true } (sustained)
+    Server->>Server: Detect sustained exitHold, start exitHoldMs countdown
     Server->>Client: exitHoldStarted (TBD hold behavior)
     Client->>Client: Show progress ring over blob
 
@@ -641,7 +801,7 @@ sequenceDiagram
 
 ## 4. Game Rules & Mechanics
 
-This section defines the authoritative gameplay rules enforced by the Game Server. There are **no rounds**—the game runs continuously. Players deposit to spawn, hunt to grow, and hold spacebar to cash out.
+This section defines the authoritative gameplay rules enforced by the Game Server. There are **no rounds**—the game runs continuously. Players deposit to spawn, hunt to grow, and hold the exit key (Q) to cash out.
 
 ### 4.1 Core Loop
 
@@ -649,7 +809,7 @@ This section defines the authoritative gameplay rules enforced by the Game Serve
 2. **Spawn** → Server verifies deposit via indexer and spawns a blob with mass proportional to the deposit (minus rake/world share).
 3. **Play** → Move toward cursor, eat pellets, eat smaller players, avoid larger players.
 4. **Exit or Die** →
-   - **Hold-to-Exit**: Hold spacebar to cash out current mass (see §2.3 for ticket flow).
+   - **Hold-to-Exit**: Hold the exit key (Q) to cash out current mass (see §2.3 for ticket flow).
    - **Death**: Get eaten by a larger player → permanently eliminated. Must re-deposit to play again.
 
 ### 4.2 Movement
@@ -741,9 +901,11 @@ During hold-to-exit, a blob's radius shrinks while mass is preserved (for payout
 
 Players can **split** their blob into two smaller blobs for aggressive plays.
 
+By default, the **Spacebar** is bound as the split key on the client.
+
 | Aspect | Rule |
 |--------|------|
-| **Trigger** | Player presses split key/button. |
+| **Trigger** | Player taps the **Spacebar** (split key). |
 | **Mass Division** | Blob of mass `m` splits into two blobs of mass `m/2` each. |
 | **Velocity Burst** | One child blob is launched forward with a speed burst in the direction of the cursor. |
 | **Max Blobs** | A player can control at most `MAX_BLOBS` (e.g., 4) blobs simultaneously. Split is blocked if at cap. |
@@ -882,9 +1044,9 @@ There is no respawn, no grace period, no second chances within a session.
 
 See §2.3 and §3.2 for the full exit flow. Summary:
 
-1. Player holds **spacebar** continuously.
+1. Player holds the **exit key (Q)** continuously.
 2. Server starts `exitHoldMs` countdown; blob enters "exiting" state.
-3. If spacebar is released or blob dies, exit is cancelled.
+3. If the exit key (Q) is released (i.e. `exitHold` becomes false) or blob dies, exit is cancelled.
 4. If countdown completes, blob is despawned and server issues a signed `ExitTicket`.
 5. Player submits ticket on-chain to withdraw payout.
 
@@ -911,7 +1073,7 @@ At full hold completion, `currentRadius = originalRadius * EXIT_MIN_RADIUS_FACTO
 
 **Cancellation:**
 
-If the player releases spacebar or gets eaten mid-hold:
+If the player releases the exit key (Q) or gets eaten mid-hold:
 - Radius instantly snaps back to normal (`RADIUS_SCALE * sqrt(mass)`).
 - Speed returns to normal.
 - No exit ticket is issued.

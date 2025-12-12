@@ -440,12 +440,48 @@ export class GameRoom extends Room<GameState> {
    */
   private handleInput(client: Client, message: InputMessage) {
     const player = this.state.players.get(client.sessionId);
+    console.log("handleInput", message);
     if (!player || !player.isAlive) return;
 
-    // Update target position for all blobs
+    // Interpret x/y as a screen-space direction vector (from center of screen).
+    // Normalize to unit length and project from the player's center into world
+    // space to derive a far-away target point for movement/split/eject.
+    let dirX = message.x;
+    let dirY = message.y;
+    const mag = Math.hypot(dirX, dirY);
+    if (mag > 0) {
+      dirX /= mag;
+      dirY /= mag;
+    } else {
+      dirX = 0;
+      dirY = 0;
+    }
+
+    let centerX = 0;
+    let centerY = 0;
+    let totalMass = 0;
     for (const blob of player.blobs) {
-      blob.targetX = Math.max(0, Math.min(GAME_CONFIG.WORLD_WIDTH, message.x));
-      blob.targetY = Math.max(0, Math.min(GAME_CONFIG.WORLD_HEIGHT, message.y));
+      totalMass += Number(blob.mass);
+      centerX += blob.x * Number(blob.mass);
+      centerY += blob.y * Number(blob.mass);
+    }
+    if (totalMass > 0) {
+      centerX /= totalMass;
+      centerY /= totalMass;
+    } else if (player.blobs.length > 0) {
+      const first = player.blobs[0]!;
+      centerX = first.x;
+      centerY = first.y;
+    }
+
+    const maxRadius = Math.min(GAME_CONFIG.WORLD_WIDTH, GAME_CONFIG.WORLD_HEIGHT) * 0.45;
+    const targetX = Math.max(0, Math.min(GAME_CONFIG.WORLD_WIDTH, centerX + dirX * maxRadius));
+    const targetY = Math.max(0, Math.min(GAME_CONFIG.WORLD_HEIGHT, centerY + dirY * maxRadius));
+
+    // Update target position for all blobs so movement uses this direction
+    for (const blob of player.blobs) {
+      blob.targetX = targetX;
+      blob.targetY = targetY;
     }
 
     // Handle Q key (exit trigger)
@@ -461,13 +497,13 @@ export class GameRoom extends Room<GameState> {
 
     // Handle Space key (split) - only if not exiting
     if (message.space && !player.isExiting) {
-      trySplitAll(player, message.x, message.y);
+      trySplitAll(player, targetX, targetY);
       updatePlayerMass(player);
     }
 
     // Handle W key (eject mass) - only if not exiting
     if (message.w && !player.isExiting) {
-      const ejected = tryEjectAll(this.state, [...player.blobs], message.x, message.y);
+      const ejected = tryEjectAll(this.state, [...player.blobs], targetX, targetY);
       for (const e of ejected) {
         this.ejectedMassGrid.insert(e);
       }
