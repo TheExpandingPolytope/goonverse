@@ -1,6 +1,9 @@
 # AgarCash – Game & Protocol Specification  
 _Agar.io-style real-money arena with minimal on-chain state_
 
+> **Note (Gameplay Parity):** We are aligning core gameplay mechanics to **Ogar3 FFA**.  
+> See `OGAR3_FFA_GAMEPLAY_PARITY_PLAN.md` for the authoritative parity plan and implementation breakdown.
+
 ---
 
 ## 0. Scope & Design Goals

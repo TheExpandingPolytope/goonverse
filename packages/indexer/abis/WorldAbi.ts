@@ -2,7 +2,6 @@ export const WorldAbi = [
   {
     inputs: [
       { internalType: "address", name: "_rakeRecipient", type: "address" },
-      { internalType: "address", name: "_worldRecipient", type: "address" },
     ],
     stateMutability: "nonpayable",
     type: "constructor",
@@ -379,13 +378,6 @@ export const WorldAbi = [
   {
     inputs: [{ internalType: "address", name: "recipient", type: "address" }],
     name: "setRakeRecipient",
-    outputs: [],
-    stateMutability: "nonpayable",
-    type: "function",
-  },
-  {
-    inputs: [{ internalType: "address", name: "recipient", type: "address" }],
-    name: "setWorldRecipient",
     outputs: [],
     stateMutability: "nonpayable",
     type: "function",

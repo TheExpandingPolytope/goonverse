@@ -1,0 +1,10 @@
+export declare function clamp(n: number, min: number, max: number): number;
+export declare function massToRadius(mass: number): number;
+export declare function massToSquareSize(mass: number): number;
+export declare function distance(x1: number, y1: number, x2: number, y2: number): number;
+export declare function randIntInclusive(min: number, max: number): number;
+export declare function randomAngleRad(): number;
+export declare function ogarPlayerSpeed(mass: number, tickMs?: number): number;
+export declare function ogarAngleRad(dx: number, dy: number): number;
+export declare function reflectAngleHorizontal(angleRad: number): number;
+export declare function reflectAngleVertical(angleRad: number): number;

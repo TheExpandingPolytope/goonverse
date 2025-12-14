@@ -112,8 +112,8 @@
       ]
     },
     "/home/glockiana/Documents/incubator/goonverse/packages/contract/contracts/World.sol": {
-      "lastModificationDate": 1765251857202,
-      "contentHash": "f4ab8c4ef7d46b26e3b62cc0448467ea",
+      "lastModificationDate": 1765677273434,
+      "contentHash": "7eb80ac64b35818e8ba0b45522555f4d",
       "sourceName": "contracts/World.sol",
       "solcConfig": {
         "version": "0.8.20",

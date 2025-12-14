@@ -4,8 +4,9 @@ export default buildModule("World", (m) => {
   const deployer = m.getAccount(0);
 
   // Deploy World Contract
-  // Constructor args: address _rakeRecipient, address _worldRecipient
-  const world = m.contract("World", [deployer, deployer]);
+  // Constructor args: address _rakeRecipient
+  // NOTE: worldRecipient is pinned to the World contract itself (world pool retained on-chain).
+  const world = m.contract("World", [deployer]);
 
   // Helper to make bytes32 IDs (pads right with zeros)
   const toBytes32 = (text) => {
@@ -22,7 +23,7 @@ export default buildModule("World", (m) => {
       id: "world_001",
       controller: deployer,
       buyInAmount: 10n ** 16n, // 0.01 ETH
-      massPerEth: 1000,
+      massPerEth: 10000,
       rakeShareBps: 500, // 5%
       worldShareBps: 300, // 3%
       exitHoldMs: 60_000, // 60s
@@ -31,7 +32,7 @@ export default buildModule("World", (m) => {
       id: "world_002",
       controller: deployer,
       buyInAmount: 2n * 10n ** 16n, // 0.02 ETH
-      massPerEth: 1000,
+      massPerEth: 10000,
       rakeShareBps: 500, // 5%
       worldShareBps: 300, // 3%
       exitHoldMs: 60_000, // 60s
@@ -40,7 +41,7 @@ export default buildModule("World", (m) => {
       id: "world_005",
       controller: deployer,
       buyInAmount: 5n * 10n ** 16n, // 0.05 ETH
-      massPerEth: 1000,
+      massPerEth: 10000,
       rakeShareBps: 500, // 5%
       worldShareBps: 300, // 3%
       exitHoldMs: 60_000, // 60s

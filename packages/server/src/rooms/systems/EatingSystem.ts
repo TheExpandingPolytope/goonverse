@@ -138,8 +138,16 @@ export function processEating(
 
   // Remove eaten pellets
   for (const pelletId of eatenPellets) {
-    state.pellets.delete(pelletId);
-    pelletGrid.remove(state.pellets.get(pelletId)!);
+    // IMPORTANT: remove from spatial grid before deleting from state map.
+    // Deleting first makes state.pellets.get(pelletId) return undefined and can crash in SpatialGrid.remove().
+    const pellet = state.pellets.get(pelletId);
+    if (pellet) {
+      pelletGrid.remove(pellet);
+      state.pellets.delete(pelletId);
+    } else {
+      // State already missing this pellet; ensure map doesn't retain the key.
+      state.pellets.delete(pelletId);
+    }
   }
 
   // Remove eaten ejected mass

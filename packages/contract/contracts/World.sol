@@ -79,13 +79,17 @@ contract World is Ownable, ReentrancyGuard {
         uint256 payout
     );
 
-    constructor(
-        address _rakeRecipient,
-        address _worldRecipient
-    ) Ownable(msg.sender) {
+    constructor(address _rakeRecipient) Ownable(msg.sender) {
         _updateRakeRecipient(_rakeRecipient);
-        _updateWorldRecipient(_worldRecipient);
+
+        // The world pool is retained inside this contract so it can be managed on-chain.
+        // (i.e., worldShare funds are NOT transferred to an external address.)
+        worldRecipient = address(this);
+        emit WorldRecipientUpdated(worldRecipient);
     }
+
+    // Allow direct ETH transfers (e.g., future world-pool top-ups).
+    receive() external payable {}
 
     // --- Admin ---
 
@@ -137,10 +141,6 @@ contract World is Ownable, ReentrancyGuard {
         _updateRakeRecipient(recipient);
     }
 
-    function setWorldRecipient(address recipient) external onlyOwner {
-        _updateWorldRecipient(recipient);
-    }
-
     function sweep(address payable to, uint256 amount) external onlyOwner {
         require(to != address(0), "to=0");
         _transferEth(to, amount);
@@ -164,12 +164,11 @@ contract World is Ownable, ReentrancyGuard {
             _transferEth(payable(rakeRecipient), rakeAmount);
         }
 
-        if (worldAmount > 0) {
-            require(worldRecipient != address(0), "world recipient unset");
-            _transferEth(payable(worldRecipient), worldAmount);
-        }
+        // worldAmount is retained in this contract (world pool).
 
-        state.bankroll += spawnAmount;
+        // Bankroll is the total exit-liquidity for this server.
+        // Since pellets (funded by worldAmount) are redeemable via exits, we include worldAmount here too.
+        state.bankroll += spawnAmount + worldAmount;
 
         bytes32 depositId = keccak256(abi.encodePacked(serverId, msg.sender, ++depositNonce));
         emit Deposit(msg.sender, serverId, depositId, amount, spawnAmount, worldAmount, rakeAmount);
@@ -232,12 +231,6 @@ contract World is Ownable, ReentrancyGuard {
         require(recipient != address(0), "rake recipient=0");
         rakeRecipient = recipient;
         emit RakeRecipientUpdated(recipient);
-    }
-
-    function _updateWorldRecipient(address recipient) private {
-        require(recipient != address(0), "world recipient=0");
-        worldRecipient = recipient;
-        emit WorldRecipientUpdated(recipient);
     }
 
     function _transferEth(address payable to, uint256 amount) private {

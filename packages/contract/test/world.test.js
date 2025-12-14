@@ -14,7 +14,7 @@ async function deployWorldFixture() {
   const token = await MockERC20.deploy(owner.address, initialSupply);
 
   const World = await ethers.getContractFactory("World");
-  const world = await World.deploy(owner.address, owner.address);
+  const world = await World.deploy(owner.address);
 
   const serverId = ethers.id("SERVER_A");
   const config = {
@@ -439,31 +439,10 @@ describe("World", function () {
       });
     });
 
-    describe("setWorldRecipient", function () {
-      it("emits WorldRecipientUpdated event", async function () {
-        const { world, alice } = await loadFixture(deployWorldFixture);
-        await expect(world.setWorldRecipient(alice.address))
-          .to.emit(world, "WorldRecipientUpdated")
-          .withArgs(alice.address);
-      });
-
-      it("updates worldRecipient address", async function () {
-        const { world, alice } = await loadFixture(deployWorldFixture);
-        await world.setWorldRecipient(alice.address);
-        expect(await world.worldRecipient()).to.equal(alice.address);
-      });
-
-      it("reverts with zero address", async function () {
+    describe("worldRecipient (world pool retention)", function () {
+      it("is pinned to the World contract address", async function () {
         const { world } = await loadFixture(deployWorldFixture);
-        await expect(world.setWorldRecipient(ethers.ZeroAddress)).to.be.revertedWith("world recipient=0");
-      });
-
-      it("reverts for non-owner", async function () {
-        const { world, alice, bob } = await loadFixture(deployWorldFixture);
-        await expect(world.connect(alice).setWorldRecipient(bob.address)).to.be.revertedWithCustomError(
-          world,
-          "OwnableUnauthorizedAccount"
-        );
+        expect(await world.worldRecipient()).to.equal(await world.getAddress());
       });
     });
 
@@ -519,7 +498,7 @@ describe("World", function () {
           .withArgs(alice.address, serverId, expectedDepositId, amount, spawn, worldFee, rake);
       });
 
-      it("credits spawn amount to contract balance and pays rake/world to recipient", async function () {
+      it("retains worldAmount in the contract (world pool) and only pays rake to the rakeRecipient", async function () {
         const { world, serverId, config, alice, owner } = await loadFixture(deployWorldFixture);
         const amount = config.buyInAmount;
         const { spawn, rake, world: worldFee } = calcSplits(amount, config.rakeShareBps, config.worldShareBps);
@@ -534,22 +513,24 @@ describe("World", function () {
         const worldBalanceAfter = await ethers.provider.getBalance(worldAddress);
         const ownerBalanceAfter = await ethers.provider.getBalance(owner.address);
 
-        expect(worldBalanceAfter - worldBalanceBefore).to.equal(spawn);
-        expect(ownerBalanceAfter - ownerBalanceBefore).to.equal(rake + worldFee);
+        // Contract retains spawn + world fee (rake is paid out)
+        expect(worldBalanceAfter - worldBalanceBefore).to.equal(spawn + worldFee);
+        // Owner (rakeRecipient + worldRecipient used to be owner) now only receives rake.
+        expect(ownerBalanceAfter - ownerBalanceBefore).to.equal(rake);
       });
 
-      it("credits spawn amount to bankroll", async function () {
+      it("credits (spawnAmount + worldAmount) to bankroll", async function () {
         const { world, token, serverId, config, alice } = await loadFixture(deployWorldFixture);
         const amount = config.buyInAmount;
         const worldAddress = await world.getAddress();
 
-        const { spawn } = calcSplits(amount, config.rakeShareBps, config.worldShareBps);
+        const { spawn, world: worldFee } = calcSplits(amount, config.rakeShareBps, config.worldShareBps);
 
         const [, bankrollBefore] = await world.getServer(serverId);
         await world.connect(alice).deposit(serverId, { value: amount });
         const [, bankrollAfter] = await world.getServer(serverId);
 
-        expect(bankrollAfter - bankrollBefore).to.equal(spawn);
+        expect(bankrollAfter - bankrollBefore).to.equal(spawn + worldFee);
       });
 
       it("increments depositNonce and generates unique depositId", async function () {
@@ -580,7 +561,7 @@ describe("World", function () {
         const { world, token, serverId, config, alice } = await loadFixture(deployWorldFixture);
         const amount = config.buyInAmount;
         const worldAddress = await world.getAddress();
-        const { spawn } = calcSplits(amount, config.rakeShareBps, config.worldShareBps);
+        const { spawn, world: worldFee } = calcSplits(amount, config.rakeShareBps, config.worldShareBps);
 
 
         await world.connect(alice).deposit(serverId, { value: amount });
@@ -588,21 +569,21 @@ describe("World", function () {
         await world.connect(alice).deposit(serverId, { value: amount });
 
         const [, bankroll] = await world.getServer(serverId);
-        expect(bankroll).to.equal(spawn * 3n);
+        expect(bankroll).to.equal((spawn + worldFee) * 3n);
       });
 
       it("allows deposits from different players", async function () {
         const { world, token, serverId, config, alice, bob } = await loadFixture(deployWorldFixture);
         const amount = config.buyInAmount;
         const worldAddress = await world.getAddress();
-        const { spawn } = calcSplits(amount, config.rakeShareBps, config.worldShareBps);
+        const { spawn, world: worldFee } = calcSplits(amount, config.rakeShareBps, config.worldShareBps);
 
 
         await world.connect(alice).deposit(serverId, { value: amount });
         await world.connect(bob).deposit(serverId, { value: amount });
 
         const [, bankroll] = await world.getServer(serverId);
-        expect(bankroll).to.equal(spawn * 2n);
+        expect(bankroll).to.equal((spawn + worldFee) * 2n);
       });
 
       it("reverts on wrong buy-in amount (too low)", async function () {
@@ -726,7 +707,8 @@ describe("World", function () {
       it("allows partial payout (less than full bankroll)", async function () {
         const { world, token, serverId, config, alice, controller } = await prepareDeposit();
         const sessionId = ethers.id("session-partial");
-        const fullPayout = calcSplits(config.buyInAmount, config.rakeShareBps, config.worldShareBps).spawn;
+        const { spawn: fullSpawn, world: worldFee } = calcSplits(config.buyInAmount, config.rakeShareBps, config.worldShareBps);
+        const fullPayout = fullSpawn;
         const partialPayout = fullPayout / 2n;
         const deadline = BigInt(await time.latest()) + 3600n;
         const signature = await signExitTicket({
@@ -744,7 +726,8 @@ describe("World", function () {
           .withArgs(alice.address, serverId, sessionId, partialPayout);
 
         const [, bankrollAfter] = await world.getServer(serverId);
-        expect(bankrollAfter).to.equal(fullPayout - partialPayout);
+        // bankroll starts at (spawn + world), then decreases by payout
+        expect(bankrollAfter).to.equal(fullPayout + worldFee - partialPayout);
       });
 
       it("allows multiple exits from different sessions", async function () {
@@ -753,7 +736,8 @@ describe("World", function () {
         // Bob also deposits
         await world.connect(bob).deposit(serverId, { value: config.buyInAmount });
 
-        const spawnPerDeposit = calcSplits(config.buyInAmount, config.rakeShareBps, config.worldShareBps).spawn;
+        const { spawn: spawnPerDeposit, world: worldFee } = calcSplits(config.buyInAmount, config.rakeShareBps, config.worldShareBps);
+        const bankrollPerDeposit = spawnPerDeposit + worldFee;
         const deadline = BigInt(await time.latest()) + 3600n;
 
         // Alice exits
@@ -785,7 +769,7 @@ describe("World", function () {
         await world.connect(bob).exitWithSignature(serverId, sessionId2, payout2, deadline, sig2);
 
         const [, bankrollAfter] = await world.getServer(serverId);
-        expect(bankrollAfter).to.equal(spawnPerDeposit * 2n - payout1 - payout2);
+        expect(bankrollAfter).to.equal(bankrollPerDeposit * 2n - payout1 - payout2);
       });
 
       it("reverts with reused ticket (session claimed)", async function () {

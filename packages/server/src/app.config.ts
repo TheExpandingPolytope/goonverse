@@ -9,6 +9,7 @@ import { GameRoom } from "./rooms/GameRoom.js";
 import { verifyPrivyToken, getPrivyUser, getPrimaryWallet } from "./auth/privy.js";
 import { getPlayerDeposits } from "./services/ponder.js";
 import { isDepositUsed } from "./services/depositTracker.js";
+import { startBalanceSync } from "./services/balance.js";
 
 // Parse Redis URL into options object so we can disable ready check.
 // Ready check sends INFO command which fails if connection is already in subscriber mode.
@@ -282,6 +283,10 @@ export default config({
   },
 
   beforeListen: () => {
+    // Start background sync to keep pelletReserveWei (worldAmount) and observed bankroll
+    // up-to-date for this serverId, even when deposits occur while no one is in-game.
+    startBalanceSync({ serverId: envConfig.serverId });
+
     console.log(`Game server starting on port ${envConfig.port}`);
     console.log(`Server ID: ${envConfig.serverId}`);
     console.log(`Ponder URL: ${envConfig.ponderUrl}`);

@@ -3,6 +3,16 @@ import type { Room } from 'colyseus.js'
 import { env } from '@/lib/env'
 import { getGameClient } from '@/lib/colyseusClient'
 import type { ClientInputMessage } from '@/world/adapters'
+import { isSnapshotReady } from '@/world/snapshot'
+
+// Server-driven visible-world snapshot (best-parity visibility deltas)
+type DeltaWorldSnapshot = {
+  init: unknown | null
+  tick: number
+  // Visible nodes only (per-client)
+  nodes: Map<number, unknown>
+  ownedIds: number[]
+}
 
 /** Derive WebSocket URL from HTTP origin */
 const getWsEndpoint = (httpOrigin: string): string => {
@@ -24,6 +34,8 @@ type JoinGameOptions = {
   wallet?: `0x${string}`
   /** Optional WebSocket endpoint for this room */
   wsEndpoint?: string
+  /** Optional player display name to share in-game */
+  displayName?: string
 }
 
 type GameClientContextValue = {
@@ -73,7 +85,6 @@ export const GameClientProvider = ({ children }: PropsWithChildren) => {
       const activeRoom = roomRef.current
       if (!activeRoom) return
       try {
-        console.log("Sending input", input.x);
         activeRoom.send('input', input)
       } catch (error) {
         console.error('[GameClient] Failed to send input message:', error)
@@ -105,18 +116,61 @@ export const GameClientProvider = ({ children }: PropsWithChildren) => {
           buyInEth: options.buyInEth,
           depositId: options.depositId,
           wallet: options.wallet,
+          displayName: options.displayName,
         })
         roomRef.current = joinedRoom
         setRoom(joinedRoom)
         setSessionId(joinedRoom.sessionId)
 
-        // Seed snapshot immediately so the renderer can draw the initial state
-        // without waiting for the first patch-driven onStateChange callback.
-        latestStateRef.current = joinedRoom.state
+        // Prefer best-parity delta stream if the server provides it.
+        // We keep the shape opaque here and let the canvas adapter interpret it.
+        const deltaSnapshot: DeltaWorldSnapshot = {
+          init: null,
+          tick: 0,
+          nodes: new Map<number, unknown>(),
+          ownedIds: [],
+        }
+        latestStateRef.current = deltaSnapshot
 
-        // Track state changes without forcing React re-renders on every tick.
+        joinedRoom.onMessage('world:init', (init) => {
+          deltaSnapshot.init = init
+          deltaSnapshot.nodes.clear()
+          deltaSnapshot.ownedIds = []
+          deltaSnapshot.tick = 0
+          // Ensure canvas reads the delta snapshot even if onStateChange fired before init arrived.
+          latestStateRef.current = deltaSnapshot
+        })
+
+        joinedRoom.onMessage('world:delta', (delta) => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const d = delta as any
+          if (typeof d?.tick === 'number') deltaSnapshot.tick = d.tick
+
+          const removed: unknown[] = Array.isArray(d?.removedIds) ? d.removedIds : []
+          for (const id of removed) {
+            if (typeof id === 'number') deltaSnapshot.nodes.delete(id)
+          }
+
+          const nodes: unknown[] = Array.isArray(d?.nodes) ? d.nodes : []
+          for (const n of nodes) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const nn = n as any
+            if (typeof nn?.id === 'number') {
+              deltaSnapshot.nodes.set(nn.id, nn)
+            }
+          }
+
+          const owned: unknown[] = Array.isArray(d?.ownedIds) ? d.ownedIds : []
+          deltaSnapshot.ownedIds = owned.filter((x): x is number => typeof x === 'number')
+          // Keep the delta snapshot as the canonical render source.
+          latestStateRef.current = deltaSnapshot
+        })
+
+        // Back-compat: if the server still uses full Schema sync, keep a valid snapshot too.
         joinedRoom.onStateChange((state) => {
-          latestStateRef.current = state
+          if (!deltaSnapshot.init && isSnapshotReady(state)) {
+            latestStateRef.current = state
+          }
         })
 
         setPhase('ingame')

@@ -1,15 +1,11 @@
 import { Room, Client } from "colyseus";
 import { 
   GameState, 
-  Player, 
-  Blob, 
-  Pellet, 
-  EjectedMass,
   type InputMessage, 
   type SpawnOptions 
 } from "./schema/GameState.js";
 import { verifyPrivyToken, getPrivyUser, getPrimaryWallet, type PrivyClaims } from "../auth/privy.js";
-import { verifyDeposit, getServer, type Deposit } from "../services/ponder.js";
+import { verifyDeposit, getServer, serverIdToBytes32 } from "../services/ponder.js";
 import {
   createExitTicket,
   generateSessionId,
@@ -18,35 +14,21 @@ import {
   payoutAmountToMass,
 } from "../services/exitController.js";
 import { tryUseDeposit } from "../services/depositTracker.js";
+import {
+  applyDepositToBalances,
+  creditPelletReserveWei,
+  getPelletReserveWei,
+  reserveExitLiquidityWei,
+  trySpendPelletReserveWei,
+} from "../services/balance.js";
 import { config } from "../config.js";
-import { GAME_CONFIG, massToRadius } from "../gameConfig.js";
 import type { PlayerUserData, AuthContext, SerializedExitTicket } from "../types.js";
 
-// Game Systems
-import { SpatialGrid, type SpatialEntity } from "./systems/SpatialGrid.js";
-import { 
-  updateBlobMovement, 
-  updateEjectedMassMovement, 
-  updateSplitTimer,
-  startExitHold,
-  cancelExitHold,
-  updateExitProgress,
-  applySoftCollision,
-  applyAttraction
-} from "./systems/PhysicsSystem.js";
-import { processEating, updatePlayerMass } from "./systems/EatingSystem.js";
-import { trySplitAll, processMerging } from "./systems/SplitMergeSystem.js";
-import { tryEjectAll } from "./systems/EjectSystem.js";
-import { spawnPellets } from "./systems/PelletSystem.js";
-import { BalanceSystem } from "./systems/BalanceSystem.js";
-
-/**
- * Blob wrapper for spatial grid
- */
-interface BlobEntity extends SpatialEntity {
-  blob: Blob;
-  player: Player;
-}
+// Ogar-like engine (parity)
+import { OGAR_FFA_CONFIG } from "./ogar/config.js";
+import { massToRadius as massToRadiusOgar } from "./ogar/math.js";
+import { OgarFfaEngine } from "./ogar/engine.js";
+import type { PlayerSim, WorldNode } from "./ogar/types.js";
 
 /**
  * Main game room
@@ -61,23 +43,43 @@ interface BlobEntity extends SpatialEntity {
  * when using RedisDriver for cross-machine room discovery.
  */
 export class GameRoom extends Room<GameState> {
-  private exitHoldMs: number = GAME_CONFIG.EXIT_HOLD_MS;
+  private exitHoldMs: number = 3000;
   private massPerEth: number = 100;
   private sessionNonce: number = 0;
   private buyInAmount: string = "0";
-  private readonly creditedDeposits: Set<string> = new Set();
   private startedAt: number = Date.now();
 
-  // Balance System
-  private balanceSystem!: BalanceSystem;
+  // Ogar-like authoritative simulation (replaces force-based systems)
+  private readonly engine = new OgarFfaEngine();
+  private tickCount: number = 0;
+  private spawnTickCount: number = 0;
+  private spawnTaskInFlight: boolean = false;
 
-  // Spatial grids for efficient collision detection
-  private blobGrid!: SpatialGrid<BlobEntity>;
-  private pelletGrid!: SpatialGrid<Pellet>;
-  private ejectedMassGrid!: SpatialGrid<EjectedMass>;
+  // Best-parity visibility: per-client visible sets + deltas
+  private readonly prevVisibleIdsBySession = new Map<string, Set<number>>();
 
-  // Player color counter
-  private colorCounter: number = 0;
+  // Input edge detection + exit-hold overlay
+  private readonly prevKeyStateBySession = new Map<string, { space: boolean; w: boolean; q: boolean }>();
+  private readonly exitHoldStartedAtBySession = new Map<string, number>();
+
+  // Cached balances for metadata
+  private cachedPelletReserveWei: bigint = 0n;
+
+  private sanitizeDisplayName(input: unknown): string | null {
+    if (typeof input !== "string") return null;
+    const trimmed = input.trim();
+    if (!trimmed) return null;
+    // Allow letters/numbers/basic punctuation and spaces. Keep it simple and safe.
+    const cleaned = trimmed.replace(/[^\p{L}\p{N} _.\-@]/gu, "");
+    const limited = cleaned.slice(0, 24).trim();
+    return limited.length > 0 ? limited : null;
+  }
+
+  private deriveFallbackDisplayName(wallet: string): string {
+    const w = wallet?.toLowerCase() ?? "";
+    if (w.startsWith("0x") && w.length >= 10) return `${w.slice(0, 6)}...${w.slice(-4)}`;
+    return "player";
+  }
 
   /**
    * Authenticate the client before allowing them to join
@@ -115,46 +117,21 @@ export class GameRoom extends Room<GameState> {
     // Initialize state
     this.setState(new GameState());
     this.state.serverId = config.serverId;
-    this.state.tickRate = GAME_CONFIG.TICK_RATE;
-    this.state.worldWidth = GAME_CONFIG.WORLD_WIDTH;
-    this.state.worldHeight = GAME_CONFIG.WORLD_HEIGHT;
-
-    // Initialize balance tracking early so metadata always has a value
-    this.balanceSystem = new BalanceSystem(config.serverId, this.massPerEth);
-    this.balanceSystem.initialize(this.state, 0n);
-
-    // Initialize spatial grids
-    this.blobGrid = new SpatialGrid<BlobEntity>(
-      GAME_CONFIG.WORLD_WIDTH,
-      GAME_CONFIG.WORLD_HEIGHT,
-      GAME_CONFIG.GRID_CELL_SIZE
-    );
-    this.pelletGrid = new SpatialGrid<Pellet>(
-      GAME_CONFIG.WORLD_WIDTH,
-      GAME_CONFIG.WORLD_HEIGHT,
-      GAME_CONFIG.GRID_CELL_SIZE
-    );
-    this.ejectedMassGrid = new SpatialGrid<EjectedMass>(
-      GAME_CONFIG.WORLD_WIDTH,
-      GAME_CONFIG.WORLD_HEIGHT,
-      GAME_CONFIG.GRID_CELL_SIZE
-    );
+    this.state.tickRate = Math.round(1000 / OGAR_FFA_CONFIG.tickMs);
+    this.state.worldWidth = OGAR_FFA_CONFIG.borderRight - OGAR_FFA_CONFIG.borderLeft;
+    this.state.worldHeight = OGAR_FFA_CONFIG.borderBottom - OGAR_FFA_CONFIG.borderTop;
 
     // Load server config from indexer
     const serverConfig = await getServer(config.serverId);
     if (serverConfig) {
       this.exitHoldMs = serverConfig.exitHoldMs;
       this.massPerEth = serverConfig.massPerEth;
-      this.balanceSystem.setMassPerEth(serverConfig.massPerEth);
       this.buyInAmount = serverConfig.buyInAmount;
       this.state.exitHoldMs = serverConfig.exitHoldMs;
       this.state.massPerEth = serverConfig.massPerEth;
-      // Ponder schema may omit worldBalance; default to zero
-      const initialBalance = (serverConfig as any).worldBalance ? BigInt((serverConfig as any).worldBalance) : 0n;
-      this.balanceSystem.initialize(this.state, initialBalance);
     }
 
-    this.refreshMetadata();
+    await this.refreshBalancesAndMetadata();
 
     // TODO: Persist world balance on dispose
     // We should probably save the balance back to Ponder or Redis periodically or on dispose
@@ -167,15 +144,12 @@ export class GameRoom extends Room<GameState> {
     });
 
     // Log initial state (useful to verify no pellets are pre-spawned)
-    console.log(
-      `GameRoom created for server ${config.serverId} with ` +
-        `${this.state.players.size} players and ${this.state.pellets.size} pellets`,
-    );
+    console.log(`GameRoom created for server ${config.serverId}`);
 
     // Set up game loop
     this.setSimulationInterval((deltaTime) => {
       this.update(deltaTime);
-    }, 1000 / GAME_CONFIG.TICK_RATE);
+    }, OGAR_FFA_CONFIG.tickMs);
 
     // (Additional lifecycle logging happens in onDispose)
   }
@@ -190,173 +164,93 @@ export class GameRoom extends Room<GameState> {
   async onJoin(client: Client, options: SpawnOptions & { reconnect?: boolean }, auth: AuthContext) {
     console.log(`Client ${client.sessionId} joining with options:`, options);
 
-    // Use wallet from auth if available, otherwise use provided wallet
     const wallet = (auth.wallet || options.wallet)?.toLowerCase() as `0x${string}`;
-
     if (!wallet) {
       throw new Error("No wallet provided");
     }
 
-    // RECONNECT FLOW: Check if this wallet already has a living entity
-    const existingPlayer = this.getPlayerByWallet(wallet);
-    if (existingPlayer && existingPlayer.isAlive) {
-      const oldSessionId = existingPlayer.sessionId;
+    if (!options.serverId) {
+      throw new Error("Missing required spawn options: serverId");
+    }
+
+    // Verify serverId matches (canonicalize so callers can pass either bytes32 or a human id)
+    if (serverIdToBytes32(options.serverId).toLowerCase() !== serverIdToBytes32(config.serverId).toLowerCase()) {
+      throw new Error(`Invalid serverId: expected ${config.serverId}, got ${options.serverId}`);
+    }
+
+    // RECONNECT FLOW: active entity already exists for this wallet
+    const existing = this.engine.findPlayerByWallet(wallet);
+    if (existing && existing.alive) {
+      const oldSessionId = existing.sessionId;
       console.log(`Reconnecting wallet ${wallet} from ${oldSessionId} to ${client.sessionId}`);
-      
-      // Update player's sessionId to match new client
-      existingPlayer.sessionId = client.sessionId;
-      
-      // Update blob owners to match new sessionId
-      for (const blob of existingPlayer.blobs) {
-        blob.owner = client.sessionId;
-      }
-      
-      // Re-key player in the map (required for lookups like state.players.get(client.sessionId))
-      this.state.players.delete(oldSessionId);
-      this.state.players.set(client.sessionId, existingPlayer);
-      
-      // Clear disconnect flag
-      (existingPlayer as any).isDisconnected = false;
-      (existingPlayer as any).disconnectedAt = 0;
-      
-      // Restore client userData
+
+      this.engine.rekeyPlayerSession(oldSessionId, client.sessionId);
+      existing.disconnectedAtMs = undefined;
+
       client.userData = {
         wallet,
-        depositId: (existingPlayer as any).depositId || options.depositId,
-        spawnMass: BigInt(Math.floor(existingPlayer.spawnMass)),
+        depositId: existing.depositId ?? (options.depositId as `0x${string}`),
+        spawnMass: 0n,
         privyClaims: auth.privyClaims,
       } as PlayerUserData;
-      
-      console.log(`Player ${client.sessionId} reconnected with mass ${existingPlayer.currentMass}`);
+
+      this.sendInit(client);
       return;
     }
 
     // SPAWN FLOW: Need a valid, unused deposit
-
-    // Validate required options for spawn
-    if (!options.serverId || !options.depositId) {
-      throw new Error("Missing required spawn options: serverId, depositId");
+    if (!options.depositId) {
+      throw new Error("Missing required spawn options: depositId");
     }
 
-    // Verify server ID matches
-    if (options.serverId.toLowerCase() !== config.serverId.toLowerCase()) {
-      throw new Error(`Invalid serverId: expected ${config.serverId}, got ${options.serverId}`);
-    }
-
-    // Verify the deposit via Ponder
-    const deposit = await verifyDeposit(
-      options.serverId,
-      options.depositId,
-      wallet
-    );
-
+    const deposit = await verifyDeposit(options.serverId, options.depositId, wallet);
     if (!deposit) {
       throw new Error("Invalid or missing deposit");
     }
 
-    // ATOMIC: Try to mark deposit as used
-    // This prevents race conditions where two clients try to use the same deposit
     const wasUnused = await tryUseDeposit(options.serverId, options.depositId);
     if (!wasUnused) {
       throw new Error("Deposit has already been used");
     }
 
-    // Double-check: entity might have been created while we were verifying deposit
-    // (handles race condition - two tabs, or reconnect timeout edge case)
-    const entityCreatedDuringVerify = this.getPlayerByWallet(wallet);
-    if (entityCreatedDuringVerify && entityCreatedDuringVerify.isAlive) {
-      // Another connection beat us - reconnect to existing entity
-      // Note: The deposit we just marked is "wasted" but that's the cost of the race condition
-      console.log(`[GameRoom] Race condition: entity exists for ${wallet}, reconnecting (deposit ${options.depositId} wasted)`);
-      
-      const oldSessionId = entityCreatedDuringVerify.sessionId;
-      entityCreatedDuringVerify.sessionId = client.sessionId;
-      for (const blob of entityCreatedDuringVerify.blobs) {
-        blob.owner = client.sessionId;
-      }
-      this.state.players.delete(oldSessionId);
-      this.state.players.set(client.sessionId, entityCreatedDuringVerify);
-      (entityCreatedDuringVerify as any).isDisconnected = false;
-      (entityCreatedDuringVerify as any).disconnectedAt = 0;
-      client.userData = {
-        wallet,
-        depositId: (entityCreatedDuringVerify as any).depositId || options.depositId,
-        spawnMass: BigInt(Math.floor(entityCreatedDuringVerify.spawnMass)),
-        privyClaims: auth.privyClaims,
-      } as PlayerUserData;
-      return;
-    }
+    // Ensure pelletReserve + observed bankroll have this deposit (idempotent, centralized)
+    await applyDepositToBalances({
+      id: deposit.id,
+      serverId: options.serverId,
+      spawnAmountWei: deposit.spawnAmount,
+      worldAmountWei: deposit.worldAmount,
+    });
 
-    // Update world balance with this deposit's world share iff it occurred after this room booted
-    this.creditWorldShare(deposit);
-
-    // Calculate spawn mass from deposit
     const spawnMass = payoutAmountToMass(deposit.spawnAmount, this.massPerEth);
 
-    // Store player data on client.userData
-    const userData: PlayerUserData = {
+    client.userData = {
       wallet,
       depositId: options.depositId,
       spawnMass: deposit.spawnAmount,
       privyClaims: auth.privyClaims,
-    };
-    client.userData = userData;
+    } as PlayerUserData;
 
-    // Create player in state
-    const player = new Player();
-    player.sessionId = client.sessionId;
-    player.wallet = wallet;
-    player.spawnMass = spawnMass;
-    player.currentMass = spawnMass;
-    player.isAlive = true;
-    player.isExiting = false;
-    player.color = this.colorCounter++ % 16;
-    
-    // Store depositId on player for reconnect recovery
-    (player as any).depositId = options.depositId;
+    const displayName =
+      this.sanitizeDisplayName((options as any).displayName) ?? this.deriveFallbackDisplayName(wallet);
 
-    // Create initial blob
-    const blob = new Blob();
-    blob.id = `${client.sessionId}_blob_0`;
-    blob.owner = client.sessionId;
-    blob.x = Math.random() * (GAME_CONFIG.WORLD_WIDTH - 200) + 100;
-    blob.y = Math.random() * (GAME_CONFIG.WORLD_HEIGHT - 200) + 100;
-    blob.targetX = blob.x;
-    blob.targetY = blob.y;
-    blob.mass = spawnMass;
-    blob.radius = massToRadius(spawnMass);
-    blob.vx = 0;
-    blob.vy = 0;
-    blob.timeSinceSplit = GAME_CONFIG.RECOMBINE_TIME_MS; // Can merge immediately if somehow split
-    blob.canMerge = true;
-
-    player.blobs.push(blob);
-    this.state.players.set(client.sessionId, player);
-
-    // Add blob to spatial grid
-    this.blobGrid.insert({
-      id: blob.id,
-      x: blob.x,
-      y: blob.y,
-      radius: blob.radius,
-      blob,
-      player,
+    const sim = this.engine.addPlayer({
+      sessionId: client.sessionId,
+      wallet,
+      displayName,
+      spawnMass,
     });
+    sim.depositId = options.depositId;
 
     console.log(`Player ${client.sessionId} spawned with mass ${spawnMass}`);
+    this.sendInit(client);
   }
 
   /**
    * Find a player by wallet address
    */
-  private getPlayerByWallet(wallet: string): Player | null {
-    const normalizedWallet = wallet.toLowerCase();
-    for (const player of this.state.players.values()) {
-      if (player.wallet.toLowerCase() === normalizedWallet) {
-        return player;
-      }
-    }
-    return null;
+  private getPlayerByWallet(wallet: string): PlayerSim | null {
+    const w = wallet.toLowerCase() as `0x${string}`;
+    return this.engine.findPlayerByWallet(w) ?? null;
   }
 
   /**
@@ -367,7 +261,7 @@ export class GameRoom extends Room<GameState> {
    */
   public hasActiveEntity(wallet: string): boolean {
     const player = this.getPlayerByWallet(wallet);
-    const hasEntity = !!player && player.isAlive;
+    const hasEntity = !!player && player.alive;
 
     if (hasEntity && player) {
       console.log(
@@ -385,47 +279,30 @@ export class GameRoom extends Room<GameState> {
    * If not consented (disconnect), keep entity alive for reconnect window.
    */
   async onLeave(client: Client, consented: boolean) {
-    const player = this.state.players.get(client.sessionId);
-
-    if (!player) {
-      console.log(`Client ${client.sessionId} left but no player found`);
+    const sim = this.engine.getPlayer(client.sessionId);
+    if (!sim) {
+      console.log(`Client ${client.sessionId} left but no sim found`);
       return;
     }
 
     if (consented) {
-      // Player intentionally left - remove immediately
       this.removePlayer(client.sessionId);
       console.log(`Client ${client.sessionId} left intentionally, removed`);
-    } else {
-      // Disconnect - keep entity alive for reconnect window
-      // Mark as disconnected so they can reconnect
-      (player as any).isDisconnected = true;
-      (player as any).disconnectedAt = Date.now();
-      console.log(`Client ${client.sessionId} disconnected, entity kept alive for reconnect`);
+      return;
     }
+
+    sim.disconnectedAtMs = Date.now();
+    console.log(`Client ${client.sessionId} disconnected, entity kept alive for reconnect`);
   }
 
   /**
    * Remove a player and their blobs from the game
    */
   private removePlayer(sessionId: string) {
-    const player = this.state.players.get(sessionId);
-    if (!player) return;
-
-      // Remove blobs from spatial grid
-      for (const blob of player.blobs) {
-        this.blobGrid.remove({
-          id: blob.id,
-          x: blob.x,
-          y: blob.y,
-          radius: blob.radius,
-          blob,
-          player,
-        });
-      }
-
-      // Remove player from state
-    this.state.players.delete(sessionId);
+    this.engine.removePlayer(sessionId);
+    this.exitHoldStartedAtBySession.delete(sessionId);
+    this.prevVisibleIdsBySession.delete(sessionId);
+    this.prevKeyStateBySession.delete(sessionId);
   }
 
   /**
@@ -439,157 +316,76 @@ export class GameRoom extends Room<GameState> {
    * Handle input messages from clients
    */
   private handleInput(client: Client, message: InputMessage) {
-    const player = this.state.players.get(client.sessionId);
-    console.log("handleInput", message);
-    if (!player || !player.isAlive) return;
+    const sim = this.engine.getPlayer(client.sessionId);
+    if (!sim || !sim.alive) return;
 
-    // Interpret x/y as a screen-space direction vector (from center of screen).
-    // Normalize to unit length and project from the player's center into world
-    // space to derive a far-away target point for movement/split/eject.
-    let dirX = message.x;
-    let dirY = message.y;
-    const mag = Math.hypot(dirX, dirY);
-    if (mag > 0) {
-      dirX /= mag;
-      dirY /= mag;
-    } else {
-      dirX = 0;
-      dirY = 0;
-    }
+    const prev = this.prevKeyStateBySession.get(client.sessionId) ?? { space: false, w: false, q: false };
+    const next = { space: !!message.space, w: !!message.w, q: !!message.q };
+    this.prevKeyStateBySession.set(client.sessionId, next);
 
-    let centerX = 0;
-    let centerY = 0;
-    let totalMass = 0;
-    for (const blob of player.blobs) {
-      totalMass += Number(blob.mass);
-      centerX += blob.x * Number(blob.mass);
-      centerY += blob.y * Number(blob.mass);
-    }
-    if (totalMass > 0) {
-      centerX /= totalMass;
-      centerY /= totalMass;
-    } else if (player.blobs.length > 0) {
-      const first = player.blobs[0]!;
-      centerX = first.x;
-      centerY = first.y;
-    }
+    // We interpret message.x/message.y as world-space mouse coordinates.
+    // (Client will be updated to send world coords; this is required for Ogar3 parity.)
+    const mouseX = Number(message.x) || 0;
+    const mouseY = Number(message.y) || 0;
 
-    const maxRadius = Math.min(GAME_CONFIG.WORLD_WIDTH, GAME_CONFIG.WORLD_HEIGHT) * 0.45;
-    const targetX = Math.max(0, Math.min(GAME_CONFIG.WORLD_WIDTH, centerX + dirX * maxRadius));
-    const targetY = Math.max(0, Math.min(GAME_CONFIG.WORLD_HEIGHT, centerY + dirY * maxRadius));
+    this.engine.setInput(client.sessionId, {
+      mouseX,
+      mouseY,
+      splitPressed: next.space && !prev.space,
+      ejectPressed: next.w && !prev.w,
+    });
 
-    // Update target position for all blobs so movement uses this direction
-    for (const blob of player.blobs) {
-      blob.targetX = targetX;
-      blob.targetY = targetY;
-    }
-
-    // Handle Q key (exit trigger)
-    if (message.q) {
-      if (!player.isExiting) {
-        this.startExit(client, player);
-      }
-    } else {
-      if (player.isExiting) {
-        this.cancelExit(player);
-      }
-    }
-
-    // Handle Space key (split) - only if not exiting
-    if (message.space && !player.isExiting) {
-      trySplitAll(player, targetX, targetY);
-      updatePlayerMass(player);
-    }
-
-    // Handle W key (eject mass) - only if not exiting
-    if (message.w && !player.isExiting) {
-      const ejected = tryEjectAll(this.state, [...player.blobs], targetX, targetY);
-      for (const e of ejected) {
-        this.ejectedMassGrid.insert(e);
-      }
-      updatePlayerMass(player);
+    // Exit-hold overlay (economic) is tracked outside the engine
+    if (next.q && !prev.q) {
+      this.exitHoldStartedAtBySession.set(client.sessionId, Date.now());
+    } else if (!next.q && prev.q) {
+      this.exitHoldStartedAtBySession.delete(client.sessionId);
     }
   }
 
   /**
    * Start the exit hold countdown
    */
-  private startExit(client: Client, player: Player) {
-    player.isExiting = true;
-    player.exitStartedAt = Date.now();
-
-    // Start exit for all blobs
-    for (const blob of player.blobs) {
-      startExitHold(blob);
-    }
-
-    console.log(`Player ${client.sessionId} started exit hold`);
+  private startExit(sessionId: string) {
+    this.exitHoldStartedAtBySession.set(sessionId, Date.now());
   }
 
   /**
    * Cancel the exit hold
    */
-  private cancelExit(player: Player) {
-    player.isExiting = false;
-    player.exitStartedAt = 0;
-
-    // Cancel exit for all blobs
-    for (const blob of player.blobs) {
-      cancelExitHold(blob);
-    }
-
-    console.log(`Player ${player.sessionId} cancelled exit`);
+  private cancelExit(sessionId: string) {
+    this.exitHoldStartedAtBySession.delete(sessionId);
   }
 
   /**
    * Complete the exit and generate ticket
    */
-  private async completeExit(client: Client, player: Player) {
-    const userData = client.userData as PlayerUserData;
+  private async completeExit(client: Client) {
+    const sim = this.engine.getPlayer(client.sessionId);
+    if (!sim || !sim.alive) return;
 
-    // Generate unique session ID for this exit
+    const userData = client.userData as PlayerUserData;
     const sessionId = generateSessionId(userData.wallet, ++this.sessionNonce);
 
-    // Calculate payout from current mass (all blobs combined)
-    const payout = massToPayoutAmount(player.currentMass, this.massPerEth);
-    if (!this.balanceSystem.hasSufficientBalance(this.state, payout)) {
-      console.error(
-        `[GameRoom] Insufficient world balance for payout of ${payout.toString()} on server ${config.serverId}`
-      );
-      this.cancelExit(player);
-      const failClient = this.clients.find((c) => c.sessionId === client.sessionId);
-      if (failClient) {
-        failClient.send("exitError", { message: "Server temporarily out of funds, please try again." });
-      }
+    const totalMass = this.engine.getPlayerTotalMass(client.sessionId);
+    const payoutWei = massToPayoutAmount(totalMass, this.massPerEth);
+
+    const reserved = await reserveExitLiquidityWei({
+      serverId: config.serverId,
+      sessionId,
+      payoutWei,
+      ttlSeconds: config.exitTicketTtlSeconds,
+    });
+
+    if (!reserved) {
+      client.send("exitError", { message: "Server temporarily out of funds, please try again." });
+      this.cancelExit(client.sessionId);
       return;
     }
-    this.balanceSystem.debit(this.state, payout);
-    this.refreshMetadata();
 
-    // Create signed exit ticket
-    const ticket = await createExitTicket(sessionId, userData.wallet, payout);
-
-    // Store ticket in Redis via Presence
+    const ticket = await createExitTicket(sessionId, userData.wallet, payoutWei);
     await storeExitTicket(this.presence, ticket);
 
-    // Mark player as dead
-    player.isAlive = false;
-    player.isExiting = false;
-
-    // Remove blobs from spatial grid
-    for (const blob of player.blobs) {
-      blob.isExiting = false;
-      this.blobGrid.remove({
-        id: blob.id,
-        x: blob.x,
-        y: blob.y,
-        radius: blob.radius,
-        blob,
-        player,
-      });
-    }
-
-    // Send ticket to client
     const serializedTicket: SerializedExitTicket = {
       serverId: ticket.serverId,
       sessionId: ticket.sessionId,
@@ -600,146 +396,216 @@ export class GameRoom extends Room<GameState> {
     };
 
     client.send("exitTicket", serializedTicket);
+    console.log(`Player ${client.sessionId} exited with payout ${payoutWei.toString()}`);
 
-    console.log(`Player ${client.sessionId} exited with payout ${payout}`);
-
-    // Remove player from state after a short delay
-    setTimeout(() => {
-      this.state.players.delete(client.sessionId);
-    }, 1000);
+    sim.alive = false;
+    this.removePlayer(client.sessionId);
   }
 
   /**
-   * Game loop update
+   * Game loop update (fixed 50ms ticks).
+   *
+   * - Runs Ogar-like authoritative simulation
+   * - Applies economic recycling to pelletReserveWei
+   * - Sends per-client visibility deltas (best parity)
    */
-  private update(deltaTime: number) {
-    const deltaTimeSeconds = deltaTime / 1000;
-    const deltaTimeMs = deltaTime;
+  private update(_deltaTime: number) {
+    this.tickCount++;
+    this.spawnTickCount++;
 
-    // 1. Update physics for all blobs
-    this.state.players.forEach((player) => {
-      if (!player.isAlive) return;
+    const result = this.engine.step();
 
-      for (const blob of player.blobs) {
-        // Update split timer
-        updateSplitTimer(blob, deltaTimeMs);
+    // Recycle: decay + ejected-fed-to-virus return value to pellet reserve
+    let recycledMass = 0;
+    for (const e of result.events) {
+      if (e.type === "massDecayed" || e.type === "ejectedFedVirus") {
+        recycledMass += e.mass;
+      }
+    }
+    if (recycledMass > 0) {
+      const wei = massToPayoutAmount(recycledMass, this.massPerEth);
+      void creditPelletReserveWei(config.serverId, wei);
+    }
 
-        // Update movement
-        updateBlobMovement(blob, deltaTimeSeconds);
-
-        // Update blob in spatial grid
-        this.blobGrid.update({
-          id: blob.id,
-          x: blob.x,
-          y: blob.y,
-          radius: blob.radius,
-          blob,
-          player,
+    // Spawn schedule (every 20 ticks): budgeted pellets + virus floor
+    if (this.spawnTickCount >= OGAR_FFA_CONFIG.spawnIntervalTicks) {
+      this.spawnTickCount = 0;
+      if (!this.spawnTaskInFlight) {
+        this.spawnTaskInFlight = true;
+        void this.spawnTickTasks().finally(() => {
+          this.spawnTaskInFlight = false;
         });
       }
-    });
+    }
 
-    // 2. Update physics for ejected mass
-    this.state.ejectedMass.forEach((ejected) => {
-      updateEjectedMassMovement(ejected, deltaTimeSeconds);
-      this.ejectedMassGrid.update(ejected);
-    });
-
-    // 3. Apply attraction between same-player blobs
-    this.state.players.forEach((player) => {
-      if (!player.isAlive) return;
-      applyAttraction(player, deltaTimeSeconds);
-    });
-
-    // 4. Apply soft collision between same-player blobs
-    this.state.players.forEach((player) => {
-      if (!player.isAlive) return;
-      applySoftCollision(player);
-    });
-
-    // 5. Process merging
-    this.state.players.forEach((player) => {
-      if (!player.isAlive) return;
-      processMerging(player);
-    });
-
-    // 6. Process eating (player-player, player-pellet, player-ejected)
-    const killedPlayers = processEating(
-      this.state,
-      this.blobGrid,
-      this.pelletGrid,
-      this.ejectedMassGrid
-    );
-
-    // Handle killed players
-    for (const sessionId of killedPlayers) {
+    // Exit-hold completion
+    for (const [sessionId, startedAt] of [...this.exitHoldStartedAtBySession.entries()]) {
+      const elapsed = Date.now() - startedAt;
+      if (elapsed < this.exitHoldMs) continue;
       const client = this.clients.find((c) => c.sessionId === sessionId);
-      if (client) {
-        client.send("death", { message: "You were eaten!" });
-      }
+      if (client) void this.completeExit(client);
+      this.exitHoldStartedAtBySession.delete(sessionId);
     }
 
-    // 7. Update exit progress for exiting players
-    this.state.players.forEach((player, sessionId) => {
-      if (!player.isExiting || !player.isAlive) return;
+    // Visibility deltas
+    for (const client of this.clients) {
+      this.sendVisibilityDelta(client);
+    }
 
-      let allBlobsComplete = true;
-      for (const blob of player.blobs) {
-        const complete = updateExitProgress(blob, player.exitStartedAt, this.exitHoldMs);
-        if (!complete) allBlobsComplete = false;
-      }
+    // Refresh balances + metadata once per second
+    if (this.tickCount % 20 === 0) {
+      void this.refreshBalancesAndMetadata();
+    }
+  }
 
-      // Check if exit hold completed
-      if (allBlobsComplete) {
-        const client = this.clients.find((c) => c.sessionId === sessionId);
-        if (client) {
-          this.completeExit(client, player);
-        }
+  private async spawnTickTasks() {
+    // Virus floor/cap logic (no economic gating)
+    this.engine.ensureVirusMin();
+
+    // Pellet spawning is gated by pelletReserveWei
+    const currentFood = this.engine.foodNodeIds.length;
+    const toSpawn = Math.min(OGAR_FFA_CONFIG.foodSpawnAmount, OGAR_FFA_CONFIG.foodMaxAmount - currentFood);
+
+    for (let i = 0; i < toSpawn; i++) {
+      const mass =
+        OGAR_FFA_CONFIG.foodMinMass +
+        Math.floor(Math.random() * OGAR_FFA_CONFIG.foodMaxMass);
+
+      const costWei = massToPayoutAmount(mass, this.massPerEth);
+      const ok = await trySpendPelletReserveWei(config.serverId, costWei);
+      if (!ok) break;
+
+      this.engine.spawnRandomFood(mass);
+    }
+  }
+
+  private buildViewBox(sim: PlayerSim) {
+    const len = sim.cellIds.length;
+    if (len <= 0) return null;
+
+    let totalSize = 1.0;
+    let cx = 0;
+    let cy = 0;
+
+    for (const id of sim.cellIds) {
+      const node = this.engine.nodes.get(id);
+      if (!node || node.kind !== "player") continue;
+      totalSize += massToRadiusOgar(node.mass);
+      cx += node.x;
+      cy += node.y;
+    }
+
+    cx = (cx / len) >> 0;
+    cy = (cy / len) >> 0;
+
+    const factor = Math.pow(Math.min(64.0 / totalSize, 1), 0.4);
+    const sightRangeX = OGAR_FFA_CONFIG.viewBaseX / factor;
+    const sightRangeY = OGAR_FFA_CONFIG.viewBaseY / factor;
+
+    return {
+      centerX: cx,
+      centerY: cy,
+      topY: cy - sightRangeY,
+      bottomY: cy + sightRangeY,
+      leftX: cx - sightRangeX,
+      rightX: cx + sightRangeX,
+    };
+  }
+
+  private sendVisibilityDelta(client: Client) {
+    const sim = this.engine.getPlayer(client.sessionId);
+    if (!sim || !sim.alive) {
+      const prev = this.prevVisibleIdsBySession.get(client.sessionId);
+      if (prev && prev.size > 0) {
+        client.send("world:delta", { tick: this.tickCount, nodes: [], removedIds: [...prev], ownedIds: [] });
       }
+      this.prevVisibleIdsBySession.set(client.sessionId, new Set());
+      return;
+    }
+
+    const box = this.buildViewBox(sim);
+    if (!box) return;
+
+    const nowVisible = new Set<number>();
+    const nodes: Array<Record<string, unknown>> = [];
+
+    for (const node of this.engine.nodes.values()) {
+      if (node.y > box.bottomY) continue;
+      if (node.y < box.topY) continue;
+      if (node.x > box.rightX) continue;
+      if (node.x < box.leftX) continue;
+
+      nowVisible.add(node.id);
+      nodes.push(this.nodeToDto(node));
+    }
+
+    const prev = this.prevVisibleIdsBySession.get(client.sessionId) ?? new Set<number>();
+    const removedIds: number[] = [];
+    for (const id of prev) {
+      if (!nowVisible.has(id)) removedIds.push(id);
+    }
+
+    this.prevVisibleIdsBySession.set(client.sessionId, nowVisible);
+
+    client.send("world:delta", {
+      tick: this.tickCount,
+      nodes,
+      removedIds,
+      ownedIds: [...sim.cellIds],
     });
+  }
 
-    // 8. Spawn pellets
-    const newPellets = spawnPellets(this.state, deltaTimeSeconds, this.balanceSystem);
-    for (const pellet of newPellets) {
-      this.pelletGrid.insert(pellet);
+  private nodeToDto(node: WorldNode): Record<string, unknown> {
+    const base: Record<string, unknown> = {
+      id: node.id,
+      kind: node.kind,
+      x: node.x,
+      y: node.y,
+    };
+
+    if (node.kind === "player") {
+      const owner = this.engine.getPlayer(node.ownerSessionId);
+      return {
+        ...base,
+        mass: node.mass,
+        radius: massToRadiusOgar(node.mass),
+        color: node.color,
+        ownerSessionId: node.ownerSessionId,
+        displayName: owner?.displayName,
+      };
     }
-    if (newPellets.length > 0) {
+    if (node.kind === "food") {
+      return { ...base, mass: node.mass, radius: massToRadiusOgar(node.mass), color: node.color };
+    }
+    if (node.kind === "ejected") {
+      return { ...base, mass: node.mass, radius: massToRadiusOgar(node.mass), color: node.color };
+    }
+    return { ...base, radius: massToRadiusOgar(node.sizeMass) };
+  }
+
+  private sendInit(client: Client) {
+    client.send("world:init", {
+      serverId: config.serverId,
+      tickMs: OGAR_FFA_CONFIG.tickMs,
+      world: {
+        left: OGAR_FFA_CONFIG.borderLeft,
+        right: OGAR_FFA_CONFIG.borderRight,
+        top: OGAR_FFA_CONFIG.borderTop,
+        bottom: OGAR_FFA_CONFIG.borderBottom,
+      },
+      massPerEth: this.massPerEth,
+      exitHoldMs: this.exitHoldMs,
+    });
+  }
+
+  private async refreshBalancesAndMetadata() {
+    try {
+      this.cachedPelletReserveWei = await getPelletReserveWei(config.serverId);
+      this.state.worldBalance = this.cachedPelletReserveWei.toString();
       this.refreshMetadata();
+    } catch (error) {
+      console.warn("[GameRoom] Failed to refresh balances:", error);
     }
-
-    // 9. Update player masses
-    this.state.players.forEach((player) => {
-      if (!player.isAlive) return;
-      updatePlayerMass(player);
-    });
-
-    // 10. Reconnect timeout handling disabled:
-    // If a player's blob persists in the world, they should always be able
-    // to reconnect later and regain control.
-  }
-
-  /**
-   * Check for disconnected players that have exceeded the reconnect timeout
-   */
-  private checkReconnectTimeouts() {
-    // Intentionally disabled.
-    // We keep disconnected entities indefinitely (they can still be eaten),
-    // and allow the owning wallet to reconnect at any time if the entity
-    // remains alive.
-  }
-
-  private creditWorldShare(deposit: Deposit) {
-    if (this.creditedDeposits.has(deposit.id)) {
-      return;
-    }
-    const depositTimestampMs = Number(deposit.timestamp ?? 0n) * 1000;
-    if (depositTimestampMs < this.startedAt) {
-      this.creditedDeposits.add(deposit.id);
-      return;
-    }
-    this.balanceSystem.credit(this.state, deposit.worldAmount ?? 0n);
-    this.creditedDeposits.add(deposit.id);
-    this.refreshMetadata();
   }
 
   private refreshMetadata() {
@@ -749,7 +615,7 @@ export class GameRoom extends Room<GameState> {
       massPerEth: this.massPerEth,
       region: config.region,
       worldContract: config.worldContractAddress,
-      worldBalance: this.balanceSystem.getBalance(this.state).toString(),
+      worldBalance: this.state.worldBalance,
     });
   }
 }

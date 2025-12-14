@@ -75,6 +75,7 @@ export class Blob extends Schema {
 export class Player extends Schema {
   @type("string") sessionId: string = "";
   @type("string") wallet: string = "";
+  @type("string") displayName: string = "";
   @type("number") spawnMass: number = 0;
   @type("number") currentMass: number = 0; // Sum of all blob masses
   @type("boolean") isAlive: boolean = true;
@@ -138,4 +139,5 @@ export interface SpawnOptions {
   serverId: `0x${string}`;
   depositId: `0x${string}`;
   wallet: `0x${string}`;
+  displayName?: string;
 }

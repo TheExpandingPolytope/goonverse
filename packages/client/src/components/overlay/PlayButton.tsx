@@ -9,6 +9,8 @@ import { env } from '@/lib/env'
 import { base, baseSepolia, foundry } from 'viem/chains'
 import type { RoomSummary } from '@/types/rooms'
 import { useUI } from '@/hooks/useUI'
+import { useEthUsdPrice } from '@/hooks/useEthUsdPrice'
+import { ethToUsd, formatEth, formatUsd } from '@/lib/formatter'
 
 // Chain config for funding
 const chains = {
@@ -21,6 +23,7 @@ const chain = chains[env.chainId as keyof typeof chains] ?? baseSepolia
 
 type PlayButtonProps = {
   servers: RoomSummary[]
+  displayName: string | null
 }
 
 type PlayPhase =
@@ -29,7 +32,7 @@ type PlayPhase =
   | 'depositing'    // Waiting for deposit tx confirmation
   | 'joining'       // Joining the game room
 
-export const PlayButton = ({ servers }: PlayButtonProps) => {
+export const PlayButton = ({ servers, displayName }: PlayButtonProps) => {
   const { isAuthenticated, login, getAccessToken, status } = useAuth()
   const { ethBalance, activeAddress, isLoading: walletLoading, refreshBalance } = useWallet()
   const { joinGame, phase: sessionPhase } = useGameSession()
@@ -37,6 +40,7 @@ export const PlayButton = ({ servers }: PlayButtonProps) => {
   const { deposit, state: depositState, error: depositError, reset: resetDeposit } = useDeposit()
   const { checkEligibility } = useJoinEligibility()
   const { hideOverlay } = useUI()
+  const { ethUsd } = useEthUsdPrice()
 
   // Local state
   const [selectedServerId, setSelectedServerId] = useState<string | null>(null)
@@ -54,6 +58,7 @@ export const PlayButton = ({ servers }: PlayButtonProps) => {
 
   // Buy-in from selected server
   const buyInEth = selectedServer?.buyInEth ?? 0
+  const buyInUsd = ethToUsd(buyInEth, ethUsd)
 
   const isLoading = status === 'loading' || walletLoading
   const needsFunding = isAuthenticated && activeAddress && ethBalance < buyInEth
@@ -79,9 +84,13 @@ export const PlayButton = ({ servers }: PlayButtonProps) => {
     if (isLoading) return 'Loading...'
     if (!isAuthenticated) return 'Sign in with Privy to store your winnings.'
     if (!activeAddress) return 'Waiting for wallet...'
-    if (needsFunding) return `You need ${(buyInEth - ethBalance).toFixed(4)} more ETH to play.`
+    if (needsFunding) {
+      const missingEth = buyInEth - ethBalance
+      const missingUsd = ethToUsd(missingEth, ethUsd)
+      return `You need ${formatUsd(missingUsd, true)} (${formatEth(missingEth)}) more to play.`
+    }
 
-    return `You'll spawn into ${selectedServer.name} with ~${buyInEth.toFixed(4)} ETH at risk.`
+    return `You'll spawn into ${selectedServer.name} with ~${formatUsd(buyInUsd, true)} (${formatEth(buyInEth)}) at risk.`
   }, [
     errorMessage,
     depositError,
@@ -96,6 +105,8 @@ export const PlayButton = ({ servers }: PlayButtonProps) => {
     needsFunding,
     buyInEth,
     ethBalance,
+    ethUsd,
+    buyInUsd,
   ])
 
   // Fund wallet flow
@@ -197,6 +208,7 @@ export const PlayButton = ({ servers }: PlayButtonProps) => {
           depositId,
           wallet: activeAddress,
           wsEndpoint: selectedServer.wsEndpoint,
+          displayName: displayName ?? undefined,
         },
         accessToken
       )
@@ -249,8 +261,8 @@ export const PlayButton = ({ servers }: PlayButtonProps) => {
           ) : (
             servers.map((server) => (
               <option key={server.serverId} value={server.serverId}>
-                Ξ{server.buyInEth} · {server.playerCount} players · Ξ
-                {server.totalWorldEth.toLocaleString()} pot
+                {formatUsd(ethToUsd(server.buyInEth, ethUsd), true)} ({formatEth(server.buyInEth)}) ·{' '}
+                {server.playerCount} players · {formatUsd(ethToUsd(server.totalWorldEth, ethUsd), true)} pot
               </option>
             ))
           )}

@@ -96,8 +96,8 @@ export async function getPlayerDeposits(
   serverId: string,
   player: `0x${string}`
 ): Promise<Deposit[]> {
-  // Convert human-readable serverId (e.g. "world_001") to bytes32 hex for the indexer
-  const serverIdHex = stringToBytes32(serverId);
+  // Convert serverId to bytes32 hex for the indexer (accepts either bytes32 hex or human-readable ids).
+  const serverIdHex = serverIdToBytes32(serverId);
 
   const query = `
     query GetPlayerDeposits($serverId: String!, $player: String!) {
@@ -127,7 +127,6 @@ export async function getPlayerDeposits(
       serverId: serverIdHex,
       player: player.toLowerCase(),
     });
-    console.log("data", data, "for serverId", serverId, "(hex:", serverIdHex, ")", "player", player);
     return data.depositss.items.map(normalizeDeposit);
   } catch (error) {
     console.error("Failed to get player deposits:", error);
@@ -142,8 +141,8 @@ export async function getPlayerExits(
   serverId: string,
   player: `0x${string}`
 ): Promise<Exit[]> {
-  // Convert human-readable serverId to bytes32 hex for the indexer
-  const serverIdHex = stringToBytes32(serverId);
+  // Convert serverId to bytes32 hex for the indexer (accepts either bytes32 hex or human-readable ids).
+  const serverIdHex = serverIdToBytes32(serverId);
 
   const query = `
     query GetPlayerExits($serverId: String!, $player: String!) {
@@ -191,8 +190,8 @@ export async function verifyDeposit(
   depositId: `0x${string}`,
   player: `0x${string}`
 ): Promise<Deposit | null> {
-  // Convert human-readable serverId to bytes32 hex for comparison with indexer data
-  const serverIdHex = stringToBytes32(serverId);
+  // Convert serverId to bytes32 hex for comparison with indexer data.
+  const serverIdHex = serverIdToBytes32(serverId);
 
   const deposit = await getDeposit(depositId);
 
@@ -219,22 +218,30 @@ export async function verifyDeposit(
 }
 
 /**
- * Convert a string to bytes32 hex format
- * e.g., "local-1" -> "0x6c6f63616c2d3100000000000000000000000000000000000000000000000000"
+ * Convert a serverId into bytes32 hex format for indexing/contract usage.
+ *
+ * - If `serverId` already starts with `0x`, we treat it as hex and right-pad it to 32 bytes.
+ * - Otherwise we encode it as UTF-8 and right-pad it to 32 bytes.
  */
-function stringToBytes32(str: string): `0x${string}` {
-  const hex = Buffer.from(str, "utf8").toString("hex");
-  // Pad to 64 hex characters (32 bytes)
-  const padded = hex.padEnd(64, "0");
-  return `0x${padded}` as `0x${string}`;
+export function serverIdToBytes32(serverId: string): `0x${string}` {
+  if (serverId.startsWith("0x")) {
+    const hex = serverId.slice(2);
+    if (hex.length > 64) {
+      throw new Error(`serverId hex too long: ${serverId}`);
+    }
+    return (`0x${hex.padEnd(64, "0")}`) as `0x${string}`;
+  }
+
+  const hex = Buffer.from(serverId, "utf8").toString("hex");
+  return (`0x${hex.padEnd(64, "0")}`) as `0x${string}`;
 }
 
 /**
  * Get server configuration from the indexer
  */
 export async function getServer(serverId: string) {
-  // Convert string serverId to bytes32 hex format
-  const serverIdHex = stringToBytes32(serverId);
+  // Convert serverId to bytes32 hex format
+  const serverIdHex = serverIdToBytes32(serverId);
 
   const query = `
     query GetServer($id: String!) {

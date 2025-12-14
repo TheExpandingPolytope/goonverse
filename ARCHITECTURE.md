@@ -57,7 +57,7 @@ graph TD
     *   `exitHoldMs`: milliseconds a player must hold the **exit key (Q)** to successfully cash out; tunable per server to balance risk/reward. On the wire this is modeled as a boolean field in the input payload (historically named `spacebar`).
 
 *   **Write Interfaces (all scoped by `serverId`):**
-*   `deposit(bytes32 serverId) payable`: User funds a session with ETH. The contract splits `msg.value` into `{ spawnAmount, worldAmount, rakeAmount }`, transfers rake/world shares immediately, credits `serverBankroll[serverId] += spawnAmount`, and emits `Deposit(player, spawnAmount, worldAmount, rakeAmount, serverId, depositId)`.
+*   `deposit(bytes32 serverId) payable`: User funds a session with ETH. The contract splits `msg.value` into `{ spawnAmount, worldAmount, rakeAmount }`, transfers the rake share immediately, **retains the world share inside `World.sol` (world pool)**, credits `serverBankroll[serverId] += (spawnAmount + worldAmount)` (since pellet-derived mass is redeemable), and emits `Deposit(player, spawnAmount, worldAmount, rakeAmount, serverId, depositId)`.
     *   `exitWithSignature(bytes32 serverId, bytes32 sessionId, uint256 payout, bytes signature)`: Player-triggered withdraw. Verifies that the payload was signed by the registered `controller`, checks `payout <= serverBankroll[serverId]`, checks `exitedSessions[serverId][sessionId] == false` (replay protection), marks session as exited, debits the bankroll, and transfers `payout` to the player. Gas is paid by the player.
     *   (Optional) `cancelDeposit(serverId, depositId)`: Used if a player never joins after depositing; refunds `spawnAmount` minus fees.
 
