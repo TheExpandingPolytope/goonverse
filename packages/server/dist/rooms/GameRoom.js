@@ -6,10 +6,10 @@ import { createExitTicket, generateSessionId, massToPayoutAmount, storeExitTicke
 import { tryUseDeposit } from "../services/depositTracker.js";
 import { applyDepositToBalances, creditPelletReserveWei, getPelletReserveWei, reserveExitLiquidityWei, trySpendPelletReserveWei, } from "../services/balance.js";
 import { config } from "../config.js";
-// Ogar-like engine (parity)
-import { OGAR_FFA_CONFIG } from "./ogar/config.js";
-import { massToRadius as massToRadiusOgar } from "./ogar/math.js";
-import { OgarFfaEngine } from "./ogar/engine.js";
+// FFA parity simulation engine
+import { FFA_CONFIG } from "./sim/config.js";
+import { massToRadius } from "./sim/math.js";
+import { FfaEngine } from "./sim/engine.js";
 /**
  * Main game room
  *
@@ -30,8 +30,8 @@ export class GameRoom extends Room {
         this.sessionNonce = 0;
         this.buyInAmount = "0";
         this.startedAt = Date.now();
-        // Ogar-like authoritative simulation (replaces force-based systems)
-        this.engine = new OgarFfaEngine();
+        // Authoritative simulation (FFA parity)
+        this.engine = new FfaEngine();
         this.tickCount = 0;
         this.spawnTickCount = 0;
         this.spawnTaskInFlight = false;
@@ -90,9 +90,9 @@ export class GameRoom extends Room {
         // Initialize state
         this.setState(new GameState());
         this.state.serverId = config.serverId;
-        this.state.tickRate = Math.round(1000 / OGAR_FFA_CONFIG.tickMs);
-        this.state.worldWidth = OGAR_FFA_CONFIG.borderRight - OGAR_FFA_CONFIG.borderLeft;
-        this.state.worldHeight = OGAR_FFA_CONFIG.borderBottom - OGAR_FFA_CONFIG.borderTop;
+        this.state.tickRate = Math.round(1000 / FFA_CONFIG.tickMs);
+        this.state.worldWidth = FFA_CONFIG.borderRight - FFA_CONFIG.borderLeft;
+        this.state.worldHeight = FFA_CONFIG.borderBottom - FFA_CONFIG.borderTop;
         // Load server config from indexer
         const serverConfig = await getServer(config.serverId);
         if (serverConfig) {
@@ -115,7 +115,7 @@ export class GameRoom extends Room {
         // Set up game loop
         this.setSimulationInterval((deltaTime) => {
             this.update(deltaTime);
-        }, OGAR_FFA_CONFIG.tickMs);
+        }, FFA_CONFIG.tickMs);
         // (Additional lifecycle logging happens in onDispose)
     }
     /**
@@ -258,7 +258,6 @@ export class GameRoom extends Room {
         const next = { space: !!message.space, w: !!message.w, q: !!message.q };
         this.prevKeyStateBySession.set(client.sessionId, next);
         // We interpret message.x/message.y as world-space mouse coordinates.
-        // (Client will be updated to send world coords; this is required for Ogar3 parity.)
         const mouseX = Number(message.x) || 0;
         const mouseY = Number(message.y) || 0;
         this.engine.setInput(client.sessionId, {
@@ -327,9 +326,9 @@ export class GameRoom extends Room {
     /**
      * Game loop update (fixed 50ms ticks).
      *
-     * - Runs Ogar-like authoritative simulation
+     * - Runs authoritative simulation
      * - Applies economic recycling to pelletReserveWei
-     * - Sends per-client visibility deltas (best parity)
+     * - Sends per-client visibility deltas
      */
     update(_deltaTime) {
         this.tickCount++;
@@ -347,7 +346,7 @@ export class GameRoom extends Room {
             void creditPelletReserveWei(config.serverId, wei);
         }
         // Spawn schedule (every 20 ticks): budgeted pellets + virus floor
-        if (this.spawnTickCount >= OGAR_FFA_CONFIG.spawnIntervalTicks) {
+        if (this.spawnTickCount >= FFA_CONFIG.spawnIntervalTicks) {
             this.spawnTickCount = 0;
             if (!this.spawnTaskInFlight) {
                 this.spawnTaskInFlight = true;
@@ -380,10 +379,10 @@ export class GameRoom extends Room {
         this.engine.ensureVirusMin();
         // Pellet spawning is gated by pelletReserveWei
         const currentFood = this.engine.foodNodeIds.length;
-        const toSpawn = Math.min(OGAR_FFA_CONFIG.foodSpawnAmount, OGAR_FFA_CONFIG.foodMaxAmount - currentFood);
+        const toSpawn = Math.min(FFA_CONFIG.foodSpawnAmount, FFA_CONFIG.foodMaxAmount - currentFood);
         for (let i = 0; i < toSpawn; i++) {
-            const mass = OGAR_FFA_CONFIG.foodMinMass +
-                Math.floor(Math.random() * OGAR_FFA_CONFIG.foodMaxMass);
+            const mass = FFA_CONFIG.foodMinMass +
+                Math.floor(Math.random() * FFA_CONFIG.foodMaxMass);
             const costWei = massToPayoutAmount(mass, this.massPerEth);
             const ok = await trySpendPelletReserveWei(config.serverId, costWei);
             if (!ok)
@@ -402,15 +401,15 @@ export class GameRoom extends Room {
             const node = this.engine.nodes.get(id);
             if (!node || node.kind !== "player")
                 continue;
-            totalSize += massToRadiusOgar(node.mass);
+            totalSize += massToRadius(node.mass);
             cx += node.x;
             cy += node.y;
         }
         cx = (cx / len) >> 0;
         cy = (cy / len) >> 0;
         const factor = Math.pow(Math.min(64.0 / totalSize, 1), 0.4);
-        const sightRangeX = OGAR_FFA_CONFIG.viewBaseX / factor;
-        const sightRangeY = OGAR_FFA_CONFIG.viewBaseY / factor;
+        const sightRangeX = FFA_CONFIG.viewBaseX / factor;
+        const sightRangeY = FFA_CONFIG.viewBaseY / factor;
         return {
             centerX: cx,
             centerY: cy,
@@ -473,29 +472,29 @@ export class GameRoom extends Room {
             return {
                 ...base,
                 mass: node.mass,
-                radius: massToRadiusOgar(node.mass),
+                radius: massToRadius(node.mass),
                 color: node.color,
                 ownerSessionId: node.ownerSessionId,
                 displayName: owner?.displayName,
             };
         }
         if (node.kind === "food") {
-            return { ...base, mass: node.mass, radius: massToRadiusOgar(node.mass), color: node.color };
+            return { ...base, mass: node.mass, radius: massToRadius(node.mass), color: node.color };
         }
         if (node.kind === "ejected") {
-            return { ...base, mass: node.mass, radius: massToRadiusOgar(node.mass), color: node.color };
+            return { ...base, mass: node.mass, radius: massToRadius(node.mass), color: node.color };
         }
-        return { ...base, radius: massToRadiusOgar(node.sizeMass) };
+        return { ...base, radius: massToRadius(node.sizeMass) };
     }
     sendInit(client) {
         client.send("world:init", {
             serverId: config.serverId,
-            tickMs: OGAR_FFA_CONFIG.tickMs,
+            tickMs: FFA_CONFIG.tickMs,
             world: {
-                left: OGAR_FFA_CONFIG.borderLeft,
-                right: OGAR_FFA_CONFIG.borderRight,
-                top: OGAR_FFA_CONFIG.borderTop,
-                bottom: OGAR_FFA_CONFIG.borderBottom,
+                left: FFA_CONFIG.borderLeft,
+                right: FFA_CONFIG.borderRight,
+                top: FFA_CONFIG.borderTop,
+                bottom: FFA_CONFIG.borderBottom,
             },
             massPerEth: this.massPerEth,
             exitHoldMs: this.exitHoldMs,

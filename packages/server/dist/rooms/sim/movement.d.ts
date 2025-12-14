@@ -1,10 +1,10 @@
 import type { PlayerNode, WorldBounds, WorldNode } from "./types.js";
 /**
- * Ogar3-style player cell movement: step-to-mouse with mass-based speed.
+ * Player cell movement: step-to-mouse with mass-based speed.
  *
  * Note: split burst momentum is handled separately via the move-engine update.
- * In Ogar3, split cells experience both the player movement step and move-engine
- * movement in the same tick.
+ * Split cells experience both the player movement step and move-engine movement
+ * in the same tick.
  */
 export declare function stepPlayerCellMovement(params: {
     cell: PlayerNode;

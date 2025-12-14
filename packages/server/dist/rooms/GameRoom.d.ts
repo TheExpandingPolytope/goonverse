@@ -95,9 +95,9 @@ export declare class GameRoom extends Room<GameState> {
     /**
      * Game loop update (fixed 50ms ticks).
      *
-     * - Runs Ogar-like authoritative simulation
+     * - Runs authoritative simulation
      * - Applies economic recycling to pelletReserveWei
-     * - Sends per-client visibility deltas (best parity)
+     * - Sends per-client visibility deltas
      */
     private update;
     private spawnTickTasks;

@@ -1,12 +1,10 @@
 /**
- * Ogar3 FFA parity constants.
+ * FFA simulation constants.
  *
- * These are derived from Ogar3's `gameserver.ini` defaults and the hardcoded
- * behaviors in its JS implementation. We keep them in one place so gameplay
- * parity can be audited and tuned deliberately.
+ * Keep these in one place so behavior can be audited and tuned deliberately.
  */
 
-export const OGAR_FFA_CONFIG = {
+export const FFA_CONFIG = {
   // Tick
   tickMs: 50, // 20Hz
 
@@ -60,7 +58,7 @@ export const OGAR_FFA_CONFIG = {
   playerMassDecayRatePerSec: 0.002,
   playerMinMassDecay: 9,
 
-  // Move engine (split/eject/virus shot) border bounce radius constant in Ogar3
+  // Move engine border bounce radius constant
   moveEngineBounceRadius: 40,
 } as const;
 

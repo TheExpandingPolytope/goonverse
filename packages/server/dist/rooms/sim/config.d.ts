@@ -1,11 +1,9 @@
 /**
- * Ogar3 FFA parity constants.
+ * FFA simulation constants.
  *
- * These are derived from Ogar3's `gameserver.ini` defaults and the hardcoded
- * behaviors in its JS implementation. We keep them in one place so gameplay
- * parity can be audited and tuned deliberately.
+ * Keep these in one place so behavior can be audited and tuned deliberately.
  */
-export declare const OGAR_FFA_CONFIG: {
+export declare const FFA_CONFIG: {
     readonly tickMs: 50;
     readonly borderLeft: 0;
     readonly borderRight: 6000;

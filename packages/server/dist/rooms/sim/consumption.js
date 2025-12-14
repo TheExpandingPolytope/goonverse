@@ -7,7 +7,7 @@ export function buildEatList(params) {
     for (const prey of candidates) {
         if (prey.id === eater.id)
             continue;
-        // Broadphase (Ogar3 collisionCheck2-like).
+        // Broadphase squared-distance check.
         const dx = prey.x - eater.x;
         const dy = prey.y - eater.y;
         if (prey.kind === "food") {
@@ -41,7 +41,7 @@ export function buildEatList(params) {
         const preyMassForGate = prey.kind === "virus" ? prey.sizeMass : prey.mass;
         if (preyMassForGate * multiplier > eater.mass)
             continue;
-        // Engulf distance gate (Ogar3 eatingRange)
+        // Engulf distance gate
         let preyEatingRange = 0;
         if (prey.kind === "player") {
             preyEatingRange = massToRadius(prey.mass) * 0.4;

@@ -1,21 +1,21 @@
-import { OGAR_FFA_CONFIG } from "./config.js";
-import { massToRadius, ogarAngleRad, ogarPlayerSpeed, randIntInclusive, } from "./math.js";
+import { FFA_CONFIG } from "./config.js";
+import { massToRadius, movementAngleRad, playerSpeedFromMass, randIntInclusive, } from "./math.js";
 import { stepMoveEngine } from "./moveEngine.js";
 import { stepPlayerCellMovement } from "./movement.js";
 import { buildEatList } from "./consumption.js";
-export class OgarFfaEngine {
+export class FfaEngine {
     constructor() {
         this.bounds = {
-            left: OGAR_FFA_CONFIG.borderLeft,
-            right: OGAR_FFA_CONFIG.borderRight,
-            top: OGAR_FFA_CONFIG.borderTop,
-            bottom: OGAR_FFA_CONFIG.borderBottom,
+            left: FFA_CONFIG.borderLeft,
+            right: FFA_CONFIG.borderRight,
+            top: FFA_CONFIG.borderTop,
+            bottom: FFA_CONFIG.borderBottom,
         };
         this.nextNodeId = 1;
         this.tick = 0;
         this.players = new Map();
         this.nodes = new Map();
-        // Node ID lists (Ogar3-like)
+        // Node ID lists
         this.playerNodeIds = [];
         this.movingNodeIds = [];
         this.virusNodeIds = [];
@@ -26,7 +26,7 @@ export class OgarFfaEngine {
         return this.nextNodeId++;
     }
     randomColor() {
-        // Close enough to Ogar3's random colors; exact palette parity isn't important.
+        // Simple random colors; exact palette isn't important.
         const colorRGB = [0xff, 0x07, (Math.random() * 256) >> 0];
         colorRGB.sort(() => 0.5 - Math.random());
         return { r: colorRGB[0] ?? 0xff, g: colorRGB[1] ?? 0x07, b: colorRGB[2] ?? 0 };
@@ -139,7 +139,7 @@ export class OgarFfaEngine {
         // Tick counters
         this.tick++;
         // Step A: move player cells + resolve eats
-        // We iterate in the same general style as Ogar3: in node insertion order.
+        // Iterate in stable insertion order.
         for (const id of [...this.playerNodeIds]) {
             const node = this.nodes.get(id);
             if (!node || node.kind !== "player")
@@ -170,7 +170,7 @@ export class OgarFfaEngine {
             if (player.input.ejectPressed) {
                 this.ejectAllEligible(player);
             }
-            // Clear edge triggers after use (Ogar3 behavior)
+            // Clear edge triggers after use
             player.input.splitPressed = false;
             player.input.ejectPressed = false;
             // Build candidates list (for now: scan all nodes; later we can spatial-index).
@@ -179,7 +179,7 @@ export class OgarFfaEngine {
                 candidates.push(other);
             }
             const preyList = buildEatList({ eater: node, candidates });
-            // Consume in list order without recalculating eligibility (matches Ogar3 pattern).
+            // Consume in list order without recalculating eligibility.
             for (const { preyId } of preyList) {
                 // prey might already be gone
                 const prey = this.nodes.get(preyId);
@@ -205,14 +205,14 @@ export class OgarFfaEngine {
                 i--;
                 continue;
             }
-            // Per-type auto hooks (Ogar3 onAutoMove)
+            // Per-type auto hooks
             if (node.kind === "player") {
                 if (node.ignoreCollisionTicks > 0) {
                     node.ignoreCollisionTicks--;
                 }
             }
             else if (node.kind === "ejected") {
-                // Try feeding viruses while moving (Ogar3 behavior)
+                // Try feeding viruses while moving
                 const fed = this.tryFeedVirus(node, events);
                 if (fed) {
                     // Node removed; also remove from moving list.
@@ -261,13 +261,13 @@ export class OgarFfaEngine {
      */
     spawnFoodBatch() {
         const currentCount = this.foodNodeIds.length;
-        const toSpawn = Math.min(OGAR_FFA_CONFIG.foodSpawnAmount, OGAR_FFA_CONFIG.foodMaxAmount - currentCount);
+        const toSpawn = Math.min(FFA_CONFIG.foodSpawnAmount, FFA_CONFIG.foodMaxAmount - currentCount);
         for (let i = 0; i < toSpawn; i++) {
             this.spawnRandomFood();
         }
     }
     spawnInitialFood() {
-        const toSpawn = Math.min(OGAR_FFA_CONFIG.foodStartAmount, OGAR_FFA_CONFIG.foodMaxAmount - this.foodNodeIds.length);
+        const toSpawn = Math.min(FFA_CONFIG.foodStartAmount, FFA_CONFIG.foodMaxAmount - this.foodNodeIds.length);
         for (let i = 0; i < toSpawn; i++) {
             this.spawnRandomFood();
         }
@@ -275,7 +275,7 @@ export class OgarFfaEngine {
     spawnRandomFood(mass) {
         const m = typeof mass === "number"
             ? mass
-            : randIntInclusive(OGAR_FFA_CONFIG.foodMinMass, OGAR_FFA_CONFIG.foodMinMass + OGAR_FFA_CONFIG.foodMaxMass - 1);
+            : randIntInclusive(FFA_CONFIG.foodMinMass, FFA_CONFIG.foodMinMass + FFA_CONFIG.foodMaxMass - 1);
         const pellet = {
             id: this.newNodeId(),
             kind: "food",
@@ -289,8 +289,8 @@ export class OgarFfaEngine {
         return pellet;
     }
     ensureVirusMin() {
-        // Spawn at most one per interval like Ogar3.
-        if (this.virusNodeIds.length >= OGAR_FFA_CONFIG.virusMinAmount)
+        // Spawn at most one per interval.
+        if (this.virusNodeIds.length >= FFA_CONFIG.virusMinAmount)
             return;
         this.trySpawnVirus();
     }
@@ -298,21 +298,21 @@ export class OgarFfaEngine {
         // Split all current cells that can split; copy array because we'll append.
         const current = [...player.cellIds];
         for (const id of current) {
-            if (player.cellIds.length >= OGAR_FFA_CONFIG.playerMaxCells)
+            if (player.cellIds.length >= FFA_CONFIG.playerMaxCells)
                 break;
             const node = this.nodes.get(id);
             if (!node || node.kind !== "player")
                 continue;
-            if (node.mass < OGAR_FFA_CONFIG.playerMinMassSplit)
+            if (node.mass < FFA_CONFIG.playerMinMassSplit)
                 continue;
             const dx = player.input.mouseX - node.x;
             const dy = player.input.mouseY - node.y;
-            const angle = ogarAngleRad(dx, dy);
+            const angle = movementAngleRad(dx, dy);
             const r = massToRadius(node.mass);
             const size = r / 2;
             const startX = node.x + size * Math.sin(angle);
             const startY = node.y + size * Math.cos(angle);
-            const splitSpeed = ogarPlayerSpeed(node.mass) * OGAR_FFA_CONFIG.playerSplitSpeedMultiplier;
+            const splitSpeed = playerSpeedFromMass(node.mass) * FFA_CONFIG.playerSplitSpeedMultiplier;
             const newMass = node.mass / 2;
             node.mass = newMass;
             const child = {
@@ -324,7 +324,7 @@ export class OgarFfaEngine {
                 mass: newMass,
                 color: node.color,
                 recombineSeconds: this.calcRecombineSeconds(newMass),
-                ignoreCollisionTicks: OGAR_FFA_CONFIG.playerSmoothSplit ? OGAR_FFA_CONFIG.smoothSplitNoCollideTicks : 0,
+                ignoreCollisionTicks: FFA_CONFIG.playerSmoothSplit ? FFA_CONFIG.smoothSplitNoCollideTicks : 0,
                 move: {
                     angleRad: angle,
                     speed: splitSpeed,
@@ -344,34 +344,34 @@ export class OgarFfaEngine {
             const node = this.nodes.get(id);
             if (!node || node.kind !== "player")
                 continue;
-            if (node.mass < OGAR_FFA_CONFIG.playerMinMassEject)
+            if (node.mass < FFA_CONFIG.playerMinMassEject)
                 continue;
             const dx = player.input.mouseX - node.x;
             const dy = player.input.mouseY - node.y;
-            let angle = ogarAngleRad(dx, dy);
+            let angle = movementAngleRad(dx, dy);
             const r = massToRadius(node.mass);
             const size = r + 5;
-            const offset = size + OGAR_FFA_CONFIG.ejectMass;
+            const offset = size + FFA_CONFIG.ejectMass;
             const startX = node.x + offset * Math.sin(angle);
             const startY = node.y + offset * Math.cos(angle);
             // Apply mass loss
-            node.mass -= OGAR_FFA_CONFIG.ejectMassLoss;
+            node.mass -= FFA_CONFIG.ejectMassLoss;
             if (node.mass < 1)
                 node.mass = 1;
             // Jitter angle
-            angle += Math.random() * (OGAR_FFA_CONFIG.ejectAngleJitterRad * 2) - OGAR_FFA_CONFIG.ejectAngleJitterRad;
+            angle += Math.random() * (FFA_CONFIG.ejectAngleJitterRad * 2) - FFA_CONFIG.ejectAngleJitterRad;
             const ejected = {
                 id: this.newNodeId(),
                 kind: "ejected",
                 x: Math.trunc(startX),
                 y: Math.trunc(startY),
-                mass: OGAR_FFA_CONFIG.ejectMass,
+                mass: FFA_CONFIG.ejectMass,
                 color: node.color,
                 lastAngleRad: angle,
                 move: {
                     angleRad: angle,
-                    speed: OGAR_FFA_CONFIG.ejectSpeed,
-                    ticksRemaining: OGAR_FFA_CONFIG.ejectTicks,
+                    speed: FFA_CONFIG.ejectSpeed,
+                    ticksRemaining: FFA_CONFIG.ejectTicks,
                     decay: 0.75,
                 },
             };
@@ -423,12 +423,12 @@ export class OgarFfaEngine {
     applyMassGain(cell, gained) {
         const player = this.players.get(cell.ownerSessionId);
         if (!player) {
-            cell.mass = Math.min(cell.mass + gained, OGAR_FFA_CONFIG.playerMaxMass);
+            cell.mass = Math.min(cell.mass + gained, FFA_CONFIG.playerMaxMass);
             return;
         }
-        // Ogar3 max-mass overflow behavior (auto split on overflow if there is a free slot)
-        if (cell.mass + gained > OGAR_FFA_CONFIG.playerMaxMass &&
-            player.cellIds.length < OGAR_FFA_CONFIG.playerMaxCells) {
+        // Max-mass overflow behavior (auto split on overflow if there is a free slot)
+        if (cell.mass + gained > FFA_CONFIG.playerMaxMass &&
+            player.cellIds.length < FFA_CONFIG.playerMaxCells) {
             const newMass = (cell.mass + gained) / 2;
             cell.mass = newMass;
             const child = {
@@ -440,10 +440,10 @@ export class OgarFfaEngine {
                 mass: newMass,
                 color: cell.color,
                 recombineSeconds: this.calcRecombineSeconds(newMass),
-                ignoreCollisionTicks: 15, // ignore collision while burst is active (matches Ogar3 moveDone behavior)
+                ignoreCollisionTicks: 15,
                 move: {
                     angleRad: 0,
-                    speed: 150 * OGAR_FFA_CONFIG.playerPopSplitSpeedMultiplier,
+                    speed: 150 * FFA_CONFIG.playerPopSplitSpeedMultiplier,
                     ticksRemaining: 15,
                     decay: 0.75,
                 },
@@ -454,11 +454,11 @@ export class OgarFfaEngine {
             this.movingNodeIds.push(child.id);
             return;
         }
-        cell.mass = Math.min(cell.mass + gained, OGAR_FFA_CONFIG.playerMaxMass);
+        cell.mass = Math.min(cell.mass + gained, FFA_CONFIG.playerMaxMass);
     }
     popByVirus(player, consumer) {
         const maxSplits = Math.floor(consumer.mass / 16) - 1;
-        const availableSlots = OGAR_FFA_CONFIG.playerMaxCells - player.cellIds.length;
+        const availableSlots = FFA_CONFIG.playerMaxCells - player.cellIds.length;
         let numSplits = Math.min(availableSlots, maxSplits);
         let splitMass = Math.min(consumer.mass / (numSplits + 1), 36);
         if (numSplits <= 0) {
@@ -509,7 +509,7 @@ export class OgarFfaEngine {
             ignoreCollisionTicks: 15,
             move: {
                 angleRad,
-                speed: speed * OGAR_FFA_CONFIG.playerPopSplitSpeedMultiplier,
+                speed: speed * FFA_CONFIG.playerPopSplitSpeedMultiplier,
                 ticksRemaining: 15,
                 decay: 0.75,
             },
@@ -520,8 +520,8 @@ export class OgarFfaEngine {
         this.movingNodeIds.push(child.id);
     }
     calcRecombineSeconds(mass) {
-        // Ogar3: base + floor(0.02 * mass)
-        return OGAR_FFA_CONFIG.playerRecombineTimeSec + Math.trunc(0.02 * mass);
+        // base + floor(0.02 * mass)
+        return FFA_CONFIG.playerRecombineTimeSec + Math.trunc(0.02 * mass);
     }
     removeNode(id) {
         const node = this.nodes.get(id);
@@ -546,13 +546,13 @@ export class OgarFfaEngine {
             x: randIntInclusive(this.bounds.left, this.bounds.right),
             y: randIntInclusive(this.bounds.top, this.bounds.bottom),
         };
-        const virusSquareSize = Math.trunc(OGAR_FFA_CONFIG.virusSizeMass * 110);
+        const virusSquareSize = Math.trunc(FFA_CONFIG.virusSizeMass * 110);
         // Avoid spawning inside large player cells
         for (const id of this.playerNodeIds) {
             const node = this.nodes.get(id);
             if (!node || node.kind !== "player")
                 continue;
-            if (node.mass < OGAR_FFA_CONFIG.virusSizeMass)
+            if (node.mass < FFA_CONFIG.virusSizeMass)
                 continue;
             const squareR = Math.trunc(100 * node.mass);
             const dx = node.x - pos.x;
@@ -576,7 +576,7 @@ export class OgarFfaEngine {
             kind: "virus",
             x: pos.x,
             y: pos.y,
-            sizeMass: OGAR_FFA_CONFIG.virusSizeMass,
+            sizeMass: FFA_CONFIG.virusSizeMass,
             feedCount: 0,
             lastFeedAngleRad: 0,
         };
@@ -584,8 +584,8 @@ export class OgarFfaEngine {
         this.virusNodeIds.push(virus.id);
     }
     tryFeedVirus(ejected, events) {
-        // Ogar3: if virus count reached max, ejected passes through
-        if (this.virusNodeIds.length >= OGAR_FFA_CONFIG.virusMaxAmount)
+        // If virus count reached max, ejected passes through
+        if (this.virusNodeIds.length >= FFA_CONFIG.virusMaxAmount)
             return false;
         // Find nearby virus (AABB radius 100 check)
         const r = 100;
@@ -618,7 +618,7 @@ export class OgarFfaEngine {
         this.removeNode(ejected.id);
         events.push({ type: "ejectedFedVirus", mass: ejected.mass });
         // Shoot a virus when feed threshold reached
-        if (target.feedCount >= OGAR_FFA_CONFIG.virusFeedAmount) {
+        if (target.feedCount >= FFA_CONFIG.virusFeedAmount) {
             target.feedCount = 0;
             this.shootVirus(target);
         }
@@ -630,13 +630,13 @@ export class OgarFfaEngine {
             kind: "virus",
             x: parent.x,
             y: parent.y,
-            sizeMass: OGAR_FFA_CONFIG.virusSizeMass,
+            sizeMass: FFA_CONFIG.virusSizeMass,
             feedCount: 0,
             lastFeedAngleRad: 0,
             move: {
                 angleRad: parent.lastFeedAngleRad,
-                speed: OGAR_FFA_CONFIG.virusShotSpeed,
-                ticksRemaining: OGAR_FFA_CONFIG.virusShotTicks,
+                speed: FFA_CONFIG.virusShotSpeed,
+                ticksRemaining: FFA_CONFIG.virusShotTicks,
                 decay: 0.75,
             },
         };
@@ -653,9 +653,9 @@ export class OgarFfaEngine {
             if (node.recombineSeconds > 0)
                 node.recombineSeconds--;
             // Mass decay
-            if (node.mass >= OGAR_FFA_CONFIG.playerMinMassDecay) {
+            if (node.mass >= FFA_CONFIG.playerMinMassDecay) {
                 const before = node.mass;
-                const decayFactor = 1 - OGAR_FFA_CONFIG.playerMassDecayRatePerSec;
+                const decayFactor = 1 - FFA_CONFIG.playerMassDecayRatePerSec;
                 node.mass = node.mass * decayFactor;
                 const decayed = before - node.mass;
                 if (decayed > 0) {

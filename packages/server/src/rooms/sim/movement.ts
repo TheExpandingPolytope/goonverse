@@ -1,12 +1,12 @@
 import type { PlayerNode, WorldBounds, WorldNode } from "./types.js";
-import { massToRadius, ogarAngleRad, ogarPlayerSpeed, distance, clamp } from "./math.js";
+import { massToRadius, movementAngleRad, playerSpeedFromMass, distance, clamp } from "./math.js";
 
 /**
- * Ogar3-style player cell movement: step-to-mouse with mass-based speed.
+ * Player cell movement: step-to-mouse with mass-based speed.
  *
  * Note: split burst momentum is handled separately via the move-engine update.
- * In Ogar3, split cells experience both the player movement step and move-engine
- * movement in the same tick.
+ * Split cells experience both the player movement step and move-engine movement
+ * in the same tick.
  */
 export function stepPlayerCellMovement(params: {
   cell: PlayerNode;
@@ -20,15 +20,15 @@ export function stepPlayerCellMovement(params: {
   const r = massToRadius(cell.mass);
   const dx = mouseX - cell.x;
   const dy = mouseY - cell.y;
-  const angle = ogarAngleRad(dx, dy);
+  const angle = movementAngleRad(dx, dy);
 
   const distToMouse = distance(cell.x, cell.y, mouseX, mouseY);
-  const step = Math.min(ogarPlayerSpeed(cell.mass), distToMouse);
+  const step = Math.min(playerSpeedFromMass(cell.mass), distToMouse);
 
   let x1 = cell.x + step * Math.sin(angle);
   let y1 = cell.y + step * Math.cos(angle);
 
-  // Same-owner collision push (pre-recombine), matching Ogar3:
+  // Same-owner collision push (pre-recombine):
   // Only adjusts the moving cell position, not the other cell.
   if (cell.ignoreCollisionTicks <= 0) {
     for (const other of ownedCells) {
@@ -42,7 +42,7 @@ export function stepPlayerCellMovement(params: {
         if (dist < collisionDist) {
           const ndy = y1 - other.y;
           const ndx = x1 - other.x;
-          const a = ogarAngleRad(ndx, ndy);
+          const a = movementAngleRad(ndx, ndy);
           const move = collisionDist - dist;
           x1 = Math.trunc(x1 + move * Math.sin(a));
           y1 = Math.trunc(y1 + move * Math.cos(a));
@@ -51,7 +51,7 @@ export function stepPlayerCellMovement(params: {
     }
   }
 
-  // Border clamp: Ogar3 clamps by radius/2.
+  // Border clamp by radius/2.
   const half = r / 2;
   x1 = clamp(x1, bounds.left + half, bounds.right - half);
   y1 = clamp(y1, bounds.top + half, bounds.bottom - half);

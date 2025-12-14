@@ -1,13 +1,13 @@
-import { OGAR_FFA_CONFIG } from "./config.js";
+import { FFA_CONFIG } from "./config.js";
 export function clamp(n, min, max) {
     return Math.max(min, Math.min(max, n));
 }
 export function massToRadius(mass) {
-    // Ogar3: ceil(sqrt(100 * mass))
+    // Reference formula: ceil(sqrt(100 * mass))
     return Math.ceil(Math.sqrt(100 * mass));
 }
 export function massToSquareSize(mass) {
-    // Ogar3: (100 * mass) >> 0
+    // Reference formula: trunc(100 * mass)
     return Math.trunc(100 * mass);
 }
 export function distance(x1, y1, x2, y2) {
@@ -22,20 +22,19 @@ export function randIntInclusive(min, max) {
 export function randomAngleRad() {
     return Math.random() * Math.PI * 2;
 }
-export function ogarPlayerSpeed(mass, tickMs = OGAR_FFA_CONFIG.tickMs) {
-    // Ogar3: playerSpeed * mass^(-1/4.5) * 50/40 (with 50ms ticks)
-    // Generalized: * tickMs/40.
-    return OGAR_FFA_CONFIG.playerSpeed * Math.pow(mass, -1.0 / 4.5) * (tickMs / 40);
+export function playerSpeedFromMass(mass, tickMs = FFA_CONFIG.tickMs) {
+    // playerSpeed * mass^(-1/4.5) * tickMs/40
+    return FFA_CONFIG.playerSpeed * Math.pow(mass, -1.0 / 4.5) * (tickMs / 40);
 }
-export function ogarAngleRad(dx, dy) {
-    // Ogar3 uses atan2(deltaX, deltaY) and then applies sin(angle) to X, cos(angle) to Y.
+export function movementAngleRad(dx, dy) {
+    // We use atan2(dx, dy) and then apply sin(angle) to X, cos(angle) to Y.
     return Math.atan2(dx, dy);
 }
 export function reflectAngleHorizontal(angleRad) {
-    // Ogar3 uses 6.28 - angle
+    // Horizontal reflection used by move-engine border bounce
     return 6.28 - angleRad;
 }
 export function reflectAngleVertical(angleRad) {
-    // Ogar3: (angle <= 3.14) ? 3.14 - angle : 9.42 - angle
+    // Vertical reflection used by move-engine border bounce
     return angleRad <= 3.14 ? 3.14 - angleRad : 9.42 - angleRad;
 }

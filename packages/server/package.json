@@ -7,7 +7,7 @@
     "start": "node dist/index.js",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/rooms/systems/__tests__/BalanceSystem.test.ts"
+    "test": "tsx --test src/rooms/sim/__tests__/math.test.ts"
   },
   "dependencies": {
     "@colyseus/redis-driver": "^0.16.0",

@@ -501,10 +501,10 @@ function rgbToHslString(rgb: ServerColor, fallbackHue: number = 200): string {
   return `hsl(${hh}, ${ss}%, ${ll}%)`
 }
 
-function computeOgarViewParams(ownedCells: ServerNodeDto[]) {
+function computeViewParams(ownedCells: ServerNodeDto[]) {
   if (ownedCells.length === 0) return null
 
-  // Ogar3: totalSize = 1 + sum(cellRadius)
+  // totalSize = 1 + sum(cellRadius)
   let totalSize = 1.0
   let sumX = 0
   let sumY = 0
@@ -555,7 +555,7 @@ export const createDeltaWorldAdapter = ({
       }
     }
 
-    const view = computeOgarViewParams(ownedCells)
+    const view = computeViewParams(ownedCells)
     if (!view) return { x: 0, y: 0 }
 
     const width = window.innerWidth
@@ -639,7 +639,7 @@ export const createDeltaWorldAdapter = ({
       }
     }
 
-    const view = computeOgarViewParams(ownedCells)
+    const view = computeViewParams(ownedCells)
     const cameraX = view?.centerX ?? worldWidth / 2
     const cameraY = view?.centerY ?? worldHeight / 2
     const zoom = view?.zoom ?? 1

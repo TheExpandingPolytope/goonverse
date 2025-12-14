@@ -1,18 +1,18 @@
 import { reflectAngleHorizontal, reflectAngleVertical } from "./math.js";
-import { OGAR_FFA_CONFIG } from "./config.js";
+import { FFA_CONFIG } from "./config.js";
 export function stepMoveEngine(pos, move, bounds) {
-    // Ogar3: X = x + speed*sin(angle); Y = y + speed*cos(angle)
+    // X = x + speed*sin(angle); Y = y + speed*cos(angle)
     let nextX = pos.x + move.speed * Math.sin(move.angleRad);
     let nextY = pos.y + move.speed * Math.cos(move.angleRad);
-    // Decay and tick down (matches Ogar3 ordering: compute next pos first, then decay/decrement)
+    // Decay and tick down (compute next pos first, then decay/decrement)
     const nextMove = {
         angleRad: move.angleRad,
         speed: move.speed * move.decay,
         ticksRemaining: move.ticksRemaining - 1,
         decay: move.decay,
     };
-    // Border bounce uses a fixed radius constant in Ogar3 (~40), and checks against the *current* position.
-    const r = OGAR_FFA_CONFIG.moveEngineBounceRadius;
+    // Border bounce uses a fixed radius constant, and checks against the *current* position.
+    const r = FFA_CONFIG.moveEngineBounceRadius;
     if (pos.x - r < bounds.left) {
         nextMove.angleRad = reflectAngleHorizontal(nextMove.angleRad);
         nextX = bounds.left + r;

@@ -18,7 +18,7 @@ export type EngineEvent = {
 export type EngineTickResult = {
     events: EngineEvent[];
 };
-export declare class OgarFfaEngine {
+export declare class FfaEngine {
     readonly bounds: WorldBounds;
     private nextNodeId;
     private tick;
