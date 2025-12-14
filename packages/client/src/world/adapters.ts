@@ -520,11 +520,12 @@ export const createDeltaWorldAdapter = ({
   sessionId,
   ethUsd,
 }: CreateWorldAdapterOptions): WorldAdapter => {
-  void sessionId
   let pointerX = 0.5
   let pointerY = 0.5
   let exitKeyHeld = false
   let exitHoldStartedAt: number | null = null
+  let splitHeld = false
+  let ejectHeld = false
 
   // Ogar-style wheel zoom factor (>= 1)
   let wheelZoom = 1
@@ -690,17 +691,20 @@ export const createDeltaWorldAdapter = ({
   const MOVE_SEND_INTERVAL_MS = 30
   let lastMoveSentAt = 0
 
+  const maybeSendMove = (now: number, mouse: { x: number; y: number }) => {
+    if (now - lastMoveSentAt < MOVE_SEND_INTERVAL_MS) return
+    lastMoveSentAt = now
+    sendInput({ x: mouse.x, y: mouse.y, q: exitKeyHeld, space: splitHeld, w: ejectHeld })
+  }
+
   const controller: WorldInputController = {
     onPointerMove: ({ x, y }) => {
       pointerX = x
       pointerY = y
 
       const now = performance.now()
-      if (now - lastMoveSentAt < MOVE_SEND_INTERVAL_MS) return
-      lastMoveSentAt = now
-
       const m = computeMouseWorld()
-      sendInput({ x: m.x, y: m.y, q: exitKeyHeld, space: false, w: false })
+      maybeSendMove(now, m)
     },
     onWheelZoom: ({ deltaY }) => {
       // Ogar wheel zoom: zoom *= 0.9^(wheelDelta / -120)
@@ -713,29 +717,33 @@ export const createDeltaWorldAdapter = ({
       exitKeyHeld = true
       if (!exitHoldStartedAt) exitHoldStartedAt = performance.now()
       const m = computeMouseWorld()
-      sendInput({ x: m.x, y: m.y, q: true, space: false, w: false })
+      sendInput({ x: m.x, y: m.y, q: true, space: splitHeld, w: ejectHeld })
     },
     onExitKeyUp: () => {
       exitKeyHeld = false
       exitHoldStartedAt = null
       const m = computeMouseWorld()
-      sendInput({ x: m.x, y: m.y, q: false, space: false, w: false })
+      sendInput({ x: m.x, y: m.y, q: false, space: splitHeld, w: ejectHeld })
     },
     onSplitKeyDown: () => {
+      splitHeld = true
       const m = computeMouseWorld()
-      sendInput({ x: m.x, y: m.y, q: exitKeyHeld, space: true, w: false })
+      sendInput({ x: m.x, y: m.y, q: exitKeyHeld, space: splitHeld, w: ejectHeld })
     },
     onSplitKeyUp: () => {
+      splitHeld = false
       const m = computeMouseWorld()
-      sendInput({ x: m.x, y: m.y, q: exitKeyHeld, space: false, w: false })
+      sendInput({ x: m.x, y: m.y, q: exitKeyHeld, space: splitHeld, w: ejectHeld })
     },
     onEjectKeyDown: () => {
+      ejectHeld = true
       const m = computeMouseWorld()
-      sendInput({ x: m.x, y: m.y, q: exitKeyHeld, space: false, w: true })
+      sendInput({ x: m.x, y: m.y, q: exitKeyHeld, space: splitHeld, w: ejectHeld })
     },
     onEjectKeyUp: () => {
+      ejectHeld = false
       const m = computeMouseWorld()
-      sendInput({ x: m.x, y: m.y, q: exitKeyHeld, space: false, w: false })
+      sendInput({ x: m.x, y: m.y, q: exitKeyHeld, space: splitHeld, w: ejectHeld })
     },
   }
 
@@ -757,6 +765,19 @@ export const createDeltaWorldAdapter = ({
     const cameraX = view.x
     const cameraY = view.y
     const zoom = view.zoom
+
+    // Keep sending movement updates even when the mouse is still.
+    // As the camera follows the player, the world-space point under the cursor changes,
+    // so the server needs updated x/y to keep moving in the intended direction.
+    if (snap.ownedIds.length > 0) {
+      const width = window.innerWidth
+      const height = window.innerHeight
+      const screenX = pointerX * width
+      const screenY = pointerY * height
+      const x = cameraX + (screenX - width / 2) / zoom
+      const y = cameraY + (screenY - height / 2) / zoom
+      maybeSendMove(now, { x, y })
+    }
 
     const playerBlobs: BlobView[] = []
     const otherBlobs: BlobView[] = []
@@ -846,6 +867,35 @@ export const createDeltaWorldAdapter = ({
       })
     }
 
+    // Leaderboard (sorted by USD) aggregated by owner.
+    const leaderboardByOwner = new Map<string, { sessionId: string; displayName: string; totalMass: number }>()
+    for (const n of snap.nodes.values()) {
+      const node = n as ServerNodeDto
+      if (node.kind !== 'player') continue
+      const owner = typeof node.ownerSessionId === 'string' ? node.ownerSessionId : 'unknown'
+      const name =
+        typeof node.displayName === 'string' && node.displayName.trim().length > 0 ? node.displayName : owner
+
+      const prev = leaderboardByOwner.get(owner)
+      if (!prev) {
+        leaderboardByOwner.set(owner, { sessionId: owner, displayName: name, totalMass: node.mass ?? 0 })
+      } else {
+        prev.totalMass += node.mass ?? 0
+        if (prev.displayName === prev.sessionId && name !== owner) prev.displayName = name
+      }
+    }
+
+    const leaderboard: WorldViewModel['hud']['leaderboard'] = []
+    for (const p of leaderboardByOwner.values()) {
+      leaderboard.push({
+        sessionId: p.sessionId,
+        displayName: p.displayName,
+        usdValue: massToUsd(p.totalMass, massPerEth, ethUsd),
+        isLocal: sessionId != null && p.sessionId === sessionId,
+      })
+    }
+    leaderboard.sort((a, b) => b.usdValue - a.usdValue)
+
     return {
       camera: { x: cameraX, y: cameraY, zoom },
       world: { width: worldWidth, height: worldHeight },
@@ -860,7 +910,7 @@ export const createDeltaWorldAdapter = ({
         payoutEstimate: 0,
         exitHoldProgress,
         localUsdWorth: massToUsd(currentMass, massPerEth, ethUsd),
-        leaderboard: [],
+        leaderboard,
       },
     }
   }

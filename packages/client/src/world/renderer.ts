@@ -574,11 +574,13 @@ export const bootstrapRenderer = (canvas: HTMLCanvasElement, getViewModel: () =>
     {
       const entries = view.hud.leaderboard
       const maxRows = Math.min(entries.length, 12)
+      const minRows = 10
       const panelW = 240
       const panelX = width - panelW - 18
       const panelY = 72
       const rowH = 18
-      const panelH = 28 + maxRows * rowH + 12
+      const rowsForPanel = Math.max(maxRows, minRows)
+      const panelH = 28 + rowsForPanel * rowH + 12
 
       ctx.fillStyle = 'rgba(0, 0, 0, 0.35)'
       ctx.strokeStyle = 'rgba(255,255,255,0.10)'
