@@ -38,6 +38,7 @@ export type BlobView = {
 }
 
 export type PelletView = {
+  id: string
   x: number
   y: number
   radius: number
@@ -47,6 +48,7 @@ export type PelletView = {
 }
 
 export type EjectedMassView = {
+  id: string
   x: number
   y: number
   radius: number
@@ -54,6 +56,7 @@ export type EjectedMassView = {
 }
 
 export type VirusView = {
+  id: string
   x: number
   y: number
   radius: number
@@ -96,6 +99,7 @@ export type WorldViewModel = {
 // to keyboard/mouse events via attachInputListeners().
 export type WorldInputController = {
   onPointerMove: (pos: { x: number; y: number }) => void
+  onWheelZoom: (event: { deltaY: number }) => void
   onExitKeyDown: () => void
   onExitKeyUp: () => void
   onSplitKeyDown: () => void
@@ -250,8 +254,9 @@ export const createWorldAdapter = ({
       })
     })
 
-    state.pellets.forEach((p: ServerPellet) => {
+    state.pellets.forEach((p: ServerPellet, id: string) => {
       pellets.push({
+        id,
         x: p.x,
         y: p.y,
         radius: p.radius,
@@ -261,8 +266,9 @@ export const createWorldAdapter = ({
       })
     })
 
-    state.ejectedMass.forEach((m: ServerEjectedMass) => {
+    state.ejectedMass.forEach((m: ServerEjectedMass, id: string) => {
       ejectedMass.push({
+        id,
         x: m.x,
         y: m.y,
         radius: m.radius,
@@ -391,6 +397,9 @@ export const createWorldAdapter = ({
         w: ejectHeld,
       })
     },
+    onWheelZoom: () => {
+      // No-op for the legacy full-schema adapter.
+    },
     onExitKeyDown: () => {
       exitKeyHeld = true
       const { x, y } = computeDirectionFromPointer()
@@ -501,31 +510,8 @@ function rgbToHslString(rgb: ServerColor, fallbackHue: number = 200): string {
   return `hsl(${hh}, ${ss}%, ${ll}%)`
 }
 
-function computeViewParams(ownedCells: ServerNodeDto[]) {
-  if (ownedCells.length === 0) return null
-
-  // totalSize = 1 + sum(cellRadius)
-  let totalSize = 1.0
-  let sumX = 0
-  let sumY = 0
-  for (const c of ownedCells) {
-    totalSize += c.radius ?? 0
-    sumX += c.x
-    sumY += c.y
-  }
-
-  const centerX = Math.trunc(sumX / ownedCells.length)
-  const centerY = Math.trunc(sumY / ownedCells.length)
-
-  const factor = Math.pow(Math.min(64.0 / totalSize, 1), 0.4)
-  const sightRangeX = 1024 / factor
-  const sightRangeY = 592 / factor
-
-  const width = window.innerWidth
-  const height = window.innerHeight
-  const zoom = Math.min(width / (2 * sightRangeX), height / (2 * sightRangeY))
-
-  return { centerX, centerY, zoom }
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value))
 }
 
 export const createDeltaWorldAdapter = ({
@@ -540,31 +526,163 @@ export const createDeltaWorldAdapter = ({
   let exitKeyHeld = false
   let exitHoldStartedAt: number | null = null
 
+  // Ogar-style wheel zoom factor (>= 1)
+  let wheelZoom = 1
+
+  // Smoothed camera state (Ogar3 client style)
+  let cameraX = 0
+  let cameraY = 0
+  let cameraZoom = 1
+  let hasCameraInit = false
+  let hasPlayerView = false
+
+  type InterpState = {
+    ox: number
+    oy: number
+    or: number
+    nx: number
+    ny: number
+    nr: number
+    updatedAt: number
+  }
+
+  const interpById = new Map<number, InterpState>()
+  let lastInterpTick = -1
+  const INTERP_WINDOW_MS = 120
+
+  const syncInterpolation = (snap: DeltaWorldSnapshot, now: number) => {
+    if (snap.tick === lastInterpTick) return
+    lastInterpTick = snap.tick
+
+    const seen = new Set<number>()
+    for (const [id, n] of snap.nodes.entries()) {
+      seen.add(id)
+      const node = n as ServerNodeDto
+      const x = node.x ?? 0
+      const y = node.y ?? 0
+      const r = node.radius ?? 0
+
+      const prev = interpById.get(id)
+      if (!prev) {
+        interpById.set(id, { ox: x, oy: y, or: r, nx: x, ny: y, nr: r, updatedAt: now })
+        continue
+      }
+
+      // IMPORTANT: When a new tick arrives, do NOT snap the interpolation origin
+      // to the previous target. Ogar3 first advances to the current interpolated
+      // position, then uses that as the new origin, which avoids visible jitter
+      // when updates arrive faster than the interpolation window.
+      const t = clamp((now - prev.updatedAt) / INTERP_WINDOW_MS, 0, 1)
+      const curX = prev.ox + (prev.nx - prev.ox) * t
+      const curY = prev.oy + (prev.ny - prev.oy) * t
+      const curR = prev.or + (prev.nr - prev.or) * t
+
+      prev.ox = curX
+      prev.oy = curY
+      prev.or = curR
+      prev.nx = x
+      prev.ny = y
+      prev.nr = r
+      prev.updatedAt = now
+    }
+
+    for (const id of interpById.keys()) {
+      if (!seen.has(id)) interpById.delete(id)
+    }
+  }
+
+  const getInterpolated = (id: number, node: ServerNodeDto, now: number) => {
+    const s = interpById.get(id)
+    if (!s) return { x: node.x, y: node.y, radius: node.radius ?? 0 }
+    const t = clamp((now - s.updatedAt) / INTERP_WINDOW_MS, 0, 1)
+    return {
+      x: s.ox + (s.nx - s.ox) * t,
+      y: s.oy + (s.ny - s.oy) * t,
+      radius: s.or + (s.nr - s.or) * t,
+    }
+  }
+
+  const updateCamera = (snap: DeltaWorldSnapshot, init: WorldInitDto, now: number) => {
+    if (!hasCameraInit) {
+      cameraX = (init.world.left + init.world.right) / 2
+      cameraY = (init.world.top + init.world.bottom) / 2
+      cameraZoom = 1
+      hasCameraInit = true
+    }
+
+    let totalSize = 0
+    let sumX = 0
+    let sumY = 0
+    let count = 0
+
+    for (const id of snap.ownedIds) {
+      const raw = snap.nodes.get(id) as ServerNodeDto | undefined
+      if (!raw || raw.kind !== 'player') continue
+      const it = getInterpolated(id, raw, now)
+      totalSize += it.radius
+      sumX += it.x
+      sumY += it.y
+      count++
+    }
+
+    if (count <= 0) {
+      hasPlayerView = false
+      return { x: cameraX, y: cameraY, zoom: cameraZoom }
+    }
+
+    const targetX = Math.trunc(sumX / count)
+    const targetY = Math.trunc(sumY / count)
+
+    const sizeForZoom = Math.max(1, totalSize)
+    const factor = Math.pow(Math.min(64.0 / sizeForZoom, 1), 0.4)
+
+    const width = window.innerWidth
+    const height = window.innerHeight
+    const ratio = Math.max(height / 1080, width / 1920)
+    const targetZoom = factor * ratio * wheelZoom
+
+    if (!hasPlayerView) {
+      cameraX = targetX
+      cameraY = targetY
+      cameraZoom = targetZoom
+      hasPlayerView = true
+      return { x: cameraX, y: cameraY, zoom: cameraZoom }
+    }
+
+    cameraZoom = (9 * cameraZoom + targetZoom) / 10
+    cameraX = (cameraX + targetX) / 2
+    cameraY = (cameraY + targetY) / 2
+
+    return { x: cameraX, y: cameraY, zoom: cameraZoom }
+  }
+
   const computeMouseWorld = (): { x: number; y: number } => {
     const snap = getStateSnapshot()
     if (!isDeltaSnapshot(snap) || !snap.init) {
       return { x: 0, y: 0 }
     }
 
-    const ownedSet = new Set<number>(snap.ownedIds)
-    const ownedCells: ServerNodeDto[] = []
-    for (const n of snap.nodes.values()) {
-      const node = n as ServerNodeDto
-      if (node.kind === 'player' && ownedSet.has(node.id)) {
-        ownedCells.push(node)
-      }
-    }
+    const now = performance.now()
+    syncInterpolation(snap, now)
 
-    const view = computeViewParams(ownedCells)
-    if (!view) return { x: 0, y: 0 }
+    const init = snap.init as WorldInitDto
+    // IMPORTANT: Do not advance camera smoothing from the input path.
+    // Camera smoothing is advanced from getViewModel() (render loop) only.
+    if (!hasCameraInit) {
+      cameraX = (init.world.left + init.world.right) / 2
+      cameraY = (init.world.top + init.world.bottom) / 2
+      cameraZoom = 1
+      hasCameraInit = true
+    }
+    const view = { x: cameraX, y: cameraY, zoom: cameraZoom }
 
     const width = window.innerWidth
     const height = window.innerHeight
     const screenX = pointerX * width
     const screenY = pointerY * height
 
-    const x = view.centerX + (screenX - width / 2) / view.zoom
-    const y = view.centerY + (screenY - height / 2) / view.zoom
+    const x = view.x + (screenX - width / 2) / view.zoom
+    const y = view.y + (screenY - height / 2) / view.zoom
     return { x, y }
   }
 
@@ -583,6 +701,13 @@ export const createDeltaWorldAdapter = ({
 
       const m = computeMouseWorld()
       sendInput({ x: m.x, y: m.y, q: exitKeyHeld, space: false, w: false })
+    },
+    onWheelZoom: ({ deltaY }) => {
+      // Ogar wheel zoom: zoom *= 0.9^(wheelDelta / -120)
+      wheelZoom *= Math.pow(0.9, deltaY / 120)
+      wheelZoom = Math.max(1, wheelZoom)
+      const max = cameraZoom > 0 ? 4 / cameraZoom : 4
+      wheelZoom = Math.min(wheelZoom, max)
     },
     onExitKeyDown: () => {
       exitKeyHeld = true
@@ -618,6 +743,9 @@ export const createDeltaWorldAdapter = ({
     const snap = getStateSnapshot()
     if (!isDeltaSnapshot(snap) || !snap.init) return null
 
+    const now = performance.now()
+    syncInterpolation(snap, now)
+
     const init = snap.init as WorldInitDto
     const worldWidth = init.world.right - init.world.left
     const worldHeight = init.world.bottom - init.world.top
@@ -625,38 +753,35 @@ export const createDeltaWorldAdapter = ({
 
     const ownedSet = new Set<number>(snap.ownedIds)
 
+    const view = updateCamera(snap, init, now)
+    const cameraX = view.x
+    const cameraY = view.y
+    const zoom = view.zoom
+
     const playerBlobs: BlobView[] = []
     const otherBlobs: BlobView[] = []
     const pellets: PelletView[] = []
     const ejectedMass: EjectedMassView[] = []
     const viruses: VirusView[] = []
 
-    const ownedCells: ServerNodeDto[] = []
-    for (const n of snap.nodes.values()) {
-      const node = n as ServerNodeDto
-      if (node.kind === 'player' && ownedSet.has(node.id)) {
-        ownedCells.push(node)
-      }
-    }
-
-    const view = computeViewParams(ownedCells)
-    const cameraX = view?.centerX ?? worldWidth / 2
-    const cameraY = view?.centerY ?? worldHeight / 2
-    const zoom = view?.zoom ?? 1
-
     let currentMass = 0
-    for (const c of ownedCells) currentMass += c.mass ?? 0
+    for (const id of snap.ownedIds) {
+      const node = snap.nodes.get(id) as ServerNodeDto | undefined
+      if (!node || node.kind !== 'player') continue
+      currentMass += node.mass ?? 0
+    }
 
     // Exit progress purely client-side (overlay)
     let exitHoldProgress = 0
     if (exitKeyHeld && exitHoldStartedAt != null && init.exitHoldMs > 0) {
-      exitHoldProgress = Math.min(1, (performance.now() - exitHoldStartedAt) / init.exitHoldMs)
+      exitHoldProgress = Math.min(1, (now - exitHoldStartedAt) / init.exitHoldMs)
     }
 
-    for (const n of snap.nodes.values()) {
+    for (const [id, n] of snap.nodes.entries()) {
       const node = n as ServerNodeDto
       if (node.kind === 'player') {
         const isLocal = ownedSet.has(node.id)
+        const it = getInterpolated(id, node, now)
         const displayName =
           (typeof node.displayName === 'string' && node.displayName.trim().length > 0
             ? node.displayName
@@ -665,12 +790,12 @@ export const createDeltaWorldAdapter = ({
               : 'player')
         const color = node.color ? rgbToHslString(node.color) : `hsl(200, 80%, 60%)`
         const mass = node.mass ?? 0
-        const radius = node.radius ?? 0
+        const radius = it.radius
         const usdValue = massToUsd(mass, massPerEth, ethUsd)
         const viewBlob: BlobView = {
           id: String(node.id),
-          x: node.x,
-          y: node.y,
+          x: it.x,
+          y: it.y,
           radius,
           mass,
           color,
@@ -687,12 +812,14 @@ export const createDeltaWorldAdapter = ({
       }
 
       if (node.kind === 'food') {
+        const it = getInterpolated(id, node, now)
         const mass = node.mass ?? 1
-        const radius = node.radius ?? 0
+        const radius = it.radius
         const color = node.color ? rgbToHslString(node.color, 90) : 'hsl(90, 70%, 55%)'
         pellets.push({
-          x: node.x,
-          y: node.y,
+          id: String(node.id),
+          x: it.x,
+          y: it.y,
           radius,
           color,
           mass,
@@ -702,17 +829,19 @@ export const createDeltaWorldAdapter = ({
       }
 
       if (node.kind === 'ejected') {
-        const radius = node.radius ?? 0
+        const it = getInterpolated(id, node, now)
         const color = node.color ? rgbToHslString(node.color, 200) : 'hsl(200, 70%, 55%)'
-        ejectedMass.push({ x: node.x, y: node.y, radius, color })
+        ejectedMass.push({ id: String(node.id), x: it.x, y: it.y, radius: it.radius, color })
         continue
       }
 
       // virus
+      const it = getInterpolated(id, node, now)
       viruses.push({
-        x: node.x,
-        y: node.y,
-        radius: node.radius ?? 0,
+        id: String(node.id),
+        x: it.x,
+        y: it.y,
+        radius: it.radius,
         color: 'hsl(120, 70%, 40%)',
       })
     }

@@ -1,306 +1,576 @@
 import type { WorldViewModel } from './adapters'
 import { formatUsd } from '@/lib/formatter'
 
-function darkerHslColor(hsl: string, lightnessDelta: number = 18): string {
-  // Expected: hsl(H, S%, L%)
-  const match = /hsl\(\s*([\d.]+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%\s*\)/i.exec(hsl)
-  if (!match) return 'rgba(0,0,0,0.35)'
-  const h = Number(match[1])
-  const s = Number(match[2])
-  const l = Number(match[3])
-  const nextL = Math.max(0, Math.min(100, l - lightnessDelta))
-  return `hsl(${h}, ${s}%, ${nextL}%)`
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value))
 }
 
-function drawCenteredText(
-  ctx: CanvasRenderingContext2D,
-  text: string,
-  x: number,
-  y: number,
-  opts?: {
-    fill?: string
-    stroke?: string
-    strokeWidth?: number
-    font?: string
-  },
-) {
-  if (opts?.font) ctx.font = opts.font
-  ctx.textAlign = 'center'
-  ctx.textBaseline = 'middle'
-  const fill = opts?.fill ?? '#f8fafc'
-  const stroke = opts?.stroke ?? 'rgba(2, 6, 23, 0.9)'
-  const strokeWidth = opts?.strokeWidth ?? 4
-  ctx.lineWidth = strokeWidth
-  ctx.strokeStyle = stroke
-  ctx.strokeText(text, x, y)
-  ctx.fillStyle = fill
-  ctx.fillText(text, x, y)
+class UText {
+  private _value = ''
+  private _color = '#FFFFFF'
+  private _stroke = true
+  private _strokeColor = '#000000'
+  private _size = 16
+  private _scale = 1
+  private _dirty = true
+  private _canvas: HTMLCanvasElement | null = null
+  private _ctx: CanvasRenderingContext2D | null = null
+
+  constructor(size?: number, color?: string, stroke?: boolean, strokeColor?: string) {
+    if (typeof size === 'number') this._size = size
+    if (typeof color === 'string') this._color = color
+    if (typeof stroke === 'boolean') this._stroke = stroke
+    if (typeof strokeColor === 'string') this._strokeColor = strokeColor
+  }
+
+  setSize(size: number) {
+    if (this._size !== size) {
+      this._size = size
+      this._dirty = true
+    }
+  }
+
+  setScale(scale: number) {
+    if (this._scale !== scale) {
+      this._scale = scale
+      this._dirty = true
+    }
+  }
+
+  setValue(value: string) {
+    if (this._value !== value) {
+      this._value = value
+      this._dirty = true
+    }
+  }
+
+  render(): HTMLCanvasElement {
+    if (!this._canvas) {
+      this._canvas = document.createElement('canvas')
+      this._ctx = this._canvas.getContext('2d')
+    }
+    const canvas = this._canvas
+    const ctx = this._ctx
+    if (!ctx) return canvas
+
+    if (this._dirty) {
+      this._dirty = false
+
+      const value = this._value
+      const scale = this._scale
+      const fontsize = this._size
+      const font = `${fontsize}px Ubuntu`
+
+      ctx.font = font
+
+      const h = Math.trunc(0.2 * fontsize)
+      const wd = fontsize * 0.1
+      const h2 = h * 0.5
+
+      canvas.width = ctx.measureText(value).width * scale + 3
+      canvas.height = (fontsize + h) * scale
+
+      // Setting canvas size resets the state.
+      ctx.font = font
+      ctx.globalAlpha = 1
+      ctx.lineWidth = wd
+      ctx.strokeStyle = this._strokeColor
+      ctx.fillStyle = this._color
+
+      ctx.setTransform(1, 0, 0, 1, 0, 0)
+      ctx.scale(scale, scale)
+      if (this._stroke) ctx.strokeText(value, 0, fontsize - h2)
+      ctx.fillText(value, 0, fontsize - h2)
+    }
+
+    return canvas
+  }
 }
 
-export const bootstrapRenderer = (
-  canvas: HTMLCanvasElement,
-  getViewModel: () => WorldViewModel | null,
-) => {
-  const context = canvas.getContext('2d')
+type JellyPoint = { x: number; y: number; size: number }
+
+type JellyState = {
+  points: JellyPoint[]
+  pointsAcc: number[]
+  wasSimpleDrawing: boolean
+}
+
+function getJellyState(map: Map<string, JellyState>, id: string): JellyState {
+  const existing = map.get(id)
+  if (existing) return existing
+  const next: JellyState = { points: [], pointsAcc: [], wasSimpleDrawing: true }
+  map.set(id, next)
+  return next
+}
+
+function getNumPoints(opts: { radius: number; isVirus: boolean; zoom: number; quality: number }): number {
+  const { radius, isVirus, zoom, quality } = opts
+
+  if (radius <= 0) return 0
+
+  let minPoints = 10
+  if (radius < 20) minPoints = 0
+  if (isVirus) minPoints = 30
+
+  let v = radius
+  if (!isVirus) v *= zoom
+  v *= quality
+
+  const pts = Math.trunc(Math.max(v, minPoints))
+  return clamp(pts, 0, 200)
+}
+
+function createPoints(state: JellyState, desired: number, x: number, y: number, radius: number) {
+  while (state.points.length > desired) {
+    const idx = Math.trunc(Math.random() * state.points.length)
+    state.points.splice(idx, 1)
+    state.pointsAcc.splice(idx, 1)
+  }
+
+  if (state.points.length === 0 && desired > 0) {
+    state.points.push({ x, y, size: radius })
+    state.pointsAcc.push(Math.random() - 0.5)
+  }
+
+  while (state.points.length < desired) {
+    const rand2 = Math.trunc(Math.random() * state.points.length)
+    const point = state.points[rand2]
+    state.points.splice(rand2, 0, { x: point.x, y: point.y, size: point.size })
+    state.pointsAcc.splice(rand2, 0, state.pointsAcc[rand2])
+  }
+}
+
+function movePoints(opts: {
+  state: JellyState
+  x: number
+  y: number
+  radius: number
+  isVirus: boolean
+  zoom: number
+  quality: number
+  timestampMs: number
+  idNum: number
+}) {
+  const { state, x, y, radius, isVirus, zoom, quality, timestampMs, idNum } = opts
+  const desired = getNumPoints({ radius, isVirus, zoom, quality })
+  createPoints(state, desired, x, y, radius)
+
+  const points = state.points
+  const acc = state.pointsAcc
+  const n = points.length
+  if (n === 0) return
+
+  for (let i = 0; i < n; i++) {
+    const prev = acc[(i - 1 + n) % n]
+    const next = acc[(i + 1) % n]
+    acc[i] += (Math.random() - 0.5) * 1
+    acc[i] *= 0.7
+    if (acc[i] > 10) acc[i] = 10
+    if (acc[i] < -10) acc[i] = -10
+    acc[i] = (prev + next + 8 * acc[i]) / 10
+  }
+
+  const rot = isVirus ? 0 : ((idNum / 1000 + timestampMs / 1e4) % (2 * Math.PI))
+
+  for (let j = 0; j < n; j++) {
+    let f = points[j].size
+    const e = points[(j - 1 + n) % n].size
+    const m = points[(j + 1) % n].size
+
+    f += acc[j]
+    if (f < 0) f = 0
+    f = (12 * f + radius) / 13
+    points[j].size = (e + m + 8 * f) / 10
+
+    const angle = (2 * Math.PI) / n
+    let rr = points[j].size
+    if (isVirus && j % 2 === 0) rr += 5
+
+    points[j].x = x + Math.cos(angle * j + rot) * rr
+    points[j].y = y + Math.sin(angle * j + rot) * rr
+  }
+}
+
+function drawGrid(ctx: CanvasRenderingContext2D, width: number, height: number, camX: number, camY: number, zoom: number) {
+  ctx.fillStyle = '#F2FBFF'
+  ctx.fillRect(0, 0, width, height)
+
+  ctx.save()
+  ctx.strokeStyle = '#000000'
+  ctx.globalAlpha = 0.2
+  ctx.scale(zoom, zoom)
+
+  const w = width / zoom
+  const h = height / zoom
+
+  // Vertical lines
+  ctx.beginPath()
+  for (let x = -0.5 + ((-camX + w / 2) % 50); x < w; x += 50) {
+    ctx.moveTo(x, 0)
+    ctx.lineTo(x, h)
+  }
+  ctx.stroke()
+
+  // Horizontal lines
+  ctx.beginPath()
+  for (let y = -0.5 + ((-camY + h / 2) % 50); y < h; y += 50) {
+    ctx.moveTo(0, y)
+    ctx.lineTo(w, y)
+  }
+  ctx.stroke()
+
+  ctx.restore()
+}
+
+export const bootstrapRenderer = (canvas: HTMLCanvasElement, getViewModel: () => WorldViewModel | null) => {
+  const ctx = canvas.getContext('2d')
 
   let animationFrameId: number | null = null
 
+  // Render caches / state
+  const jellyById = new Map<string, JellyState>()
+  const blobTextById = new Map<string, { name: UText; usd: UText }>()
+  const pelletLabelByValue = new Map<string, UText>()
+  const bottomWorthText = new UText(28, '#FFFFFF', true, '#000000')
+
+  // Simple skin support (optional; expects /skinList.txt and /skins/<name>.png)
+  let knownSkins: Set<string> | null = null
+  let triedSkinList = false
+  const skins = new Map<string, HTMLImageElement>()
+
+  const ensureSkinList = () => {
+    if (triedSkinList) return
+    triedSkinList = true
+
+    fetch('/skinList.txt')
+      .then((resp) => {
+        if (!resp.ok) throw new Error('skinList.txt not found')
+        return resp.text()
+      })
+      .then((text) => {
+        const names = text.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+        knownSkins = new Set(names)
+      })
+      .catch(() => {
+        knownSkins = new Set()
+      })
+  }
+
+  const getSkinImage = (skinName: string): HTMLImageElement | null => {
+    if (!knownSkins || !knownSkins.has(skinName)) return null
+
+    const cached = skins.get(skinName)
+    if (cached) {
+      if (cached.complete && cached.naturalWidth > 0) return cached
+      return null
+    }
+
+    const img = new Image()
+    img.src = `/skins/${skinName}.png`
+    skins.set(skinName, img)
+    return null
+  }
+
+  // Adaptive jelly quality (Ogar-style)
+  let quality = 1
+  let lastFrameAt = performance.now()
+
   const render = () => {
-    if (!context) return
+    if (!ctx) return
+
+    ensureSkinList()
 
     const { width, height } = canvas
-    context.clearRect(0, 0, width, height)
-
-    // Background
-    context.fillStyle = 'rgba(15, 23, 42, 1)' // slate-900
-    context.fillRect(0, 0, width, height)
-
     const view = getViewModel()
 
     if (!view) {
-      // Before joining a room we only have screen-space; draw a subtle grid.
-      context.strokeStyle = 'rgba(148, 163, 184, 0.15)'
-      context.lineWidth = 1
-      const gridSize = 64
-      for (let x = 0; x < width; x += gridSize) {
-        context.beginPath()
-        context.moveTo(x, 0)
-        context.lineTo(x, height)
-        context.stroke()
-      }
-      for (let y = 0; y < height; y += gridSize) {
-        context.beginPath()
-        context.moveTo(0, y)
-        context.lineTo(width, y)
-        context.stroke()
-      }
-
+      // Basic empty-state: light background + grid.
+      drawGrid(ctx, width, height, 0, 0, 1)
       animationFrameId = requestAnimationFrame(render)
       return
     }
 
-    // Compute world -> screen transform based on camera
-    const scale = view.camera.zoom
-    const halfW = width / 2
-    const halfH = height / 2
+    const now = performance.now()
+    const dt = now - lastFrameAt
+    lastFrameAt = now
 
-    const toScreen = (x: number, y: number) => {
-      const sx = (x - view.camera.x) * scale + halfW
-      const sy = (y - view.camera.y) * scale + halfH
-      return { x: sx, y: sy }
+    // Ogar quality adaptation
+    if (dt > 1000 / 60) quality -= 0.01
+    else if (dt < 1000 / 65) quality += 0.01
+    quality = clamp(quality, 0.4, 1)
+
+    const camX = view.camera.x
+    const camY = view.camera.y
+    const zoom = view.camera.zoom
+
+    drawGrid(ctx, width, height, camX, camY, zoom)
+
+    // Build a unified, size-sorted node list (Ogar-style)
+    const nodes: Array<
+      | { kind: 'food'; id: string; x: number; y: number; radius: number; color: string; usdValue: number }
+      | { kind: 'ejected'; id: string; x: number; y: number; radius: number; color: string }
+      | { kind: 'virus'; id: string; x: number; y: number; radius: number; color: string }
+      | {
+          kind: 'player'
+          id: string
+          x: number
+          y: number
+          radius: number
+          color: string
+          displayName: string
+          usdValue: number
+          isLocal: boolean
+        }
+    > = []
+
+    for (const p of view.pellets) {
+      nodes.push({ kind: 'food', id: p.id, x: p.x, y: p.y, radius: p.radius, color: p.color, usdValue: p.usdValue })
+    }
+    for (const m of view.ejectedMass) {
+      nodes.push({ kind: 'ejected', id: m.id, x: m.x, y: m.y, radius: m.radius, color: m.color })
+    }
+    for (const v of view.viruses) {
+      nodes.push({ kind: 'virus', id: v.id, x: v.x, y: v.y, radius: v.radius, color: v.color })
+    }
+    for (const b of view.otherBlobs) {
+      nodes.push({
+        kind: 'player',
+        id: b.id,
+        x: b.x,
+        y: b.y,
+        radius: b.isExiting ? b.exitRadius : b.radius,
+        color: b.color,
+        displayName: b.displayName,
+        usdValue: b.usdValue,
+        isLocal: b.isLocal,
+      })
+    }
+    for (const b of view.playerBlobs) {
+      nodes.push({
+        kind: 'player',
+        id: b.id,
+        x: b.x,
+        y: b.y,
+        radius: b.isExiting ? b.exitRadius : b.radius,
+        color: b.color,
+        displayName: b.displayName,
+        usdValue: b.usdValue,
+        isLocal: b.isLocal,
+      })
     }
 
-    // World-space grid (moves with camera). This makes movement visible even
-    // when the camera follows the local player.
-    {
-      const minor = 200
-      const major = 1000
+    nodes.sort((a, b) => {
+      if (a.radius !== b.radius) return a.radius - b.radius
+      const an = Number(a.id)
+      const bn = Number(b.id)
+      if (!Number.isNaN(an) && !Number.isNaN(bn)) return an - bn
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+    })
 
-      const worldLeft = view.camera.x - halfW / scale
-      const worldRight = view.camera.x + halfW / scale
-      const worldTop = view.camera.y - halfH / scale
-      const worldBottom = view.camera.y + halfH / scale
+    // World transform
+    ctx.save()
+    ctx.translate(width / 2, height / 2)
+    ctx.scale(zoom, zoom)
+    ctx.translate(-camX, -camY)
 
-      const drawGrid = (step: number, alpha: number) => {
-        context.strokeStyle = `rgba(148, 163, 184, ${alpha})`
-        context.lineWidth = 1
+    const ratio = Math.ceil(10 * zoom) * 0.1
+    const invRatio = 1 / ratio
 
-        const startX = Math.floor(worldLeft / step) * step
-        const endX = Math.ceil(worldRight / step) * step
-        for (let x = startX; x <= endX; x += step) {
-          const a = toScreen(x, worldTop)
-          const b = toScreen(x, worldBottom)
-          context.beginPath()
-          context.moveTo(a.x, a.y)
-          context.lineTo(b.x, b.y)
-          context.stroke()
+    for (const node of nodes) {
+      const x = node.x
+      const y = node.y
+      const r = node.radius
+
+      if (r <= 0) continue
+
+      if (node.kind === 'food') {
+        ctx.beginPath()
+        ctx.arc(x, y, r, 0, Math.PI * 2)
+        ctx.fillStyle = node.color
+        ctx.fill()
+
+        // USD label above pellet
+        const label = formatUsd(node.usdValue, true)
+        if (r >= 4) {
+          let text = pelletLabelByValue.get(label)
+          if (!text) {
+            text = new UText(14, '#FFFFFF', true, '#000000')
+            text.setValue(label)
+            pelletLabelByValue.set(label, text)
+          }
+          text.setScale(ratio)
+          const c = text.render()
+          const w = Math.trunc(c.width * invRatio)
+          const h = Math.trunc(c.height * invRatio)
+          ctx.drawImage(c, x - Math.trunc(w / 2), y - r - 10, w, h)
+        }
+        continue
+      }
+
+      if (node.kind === 'ejected') {
+        ctx.beginPath()
+        ctx.arc(x, y, r, 0, Math.PI * 2)
+        ctx.fillStyle = node.color
+        ctx.fill()
+        continue
+      }
+
+      const isVirus = node.kind === 'virus'
+
+      // Jelly / spiky rendering for player + virus
+      const state = getJellyState(jellyById, node.id)
+      const desired = getNumPoints({ radius: r, isVirus, zoom, quality })
+
+      let simple = !isVirus && zoom < 0.4
+      if (desired < 10) simple = true
+
+      // If we were simple and now want jelly (or vice versa), reset point sizes.
+      if (state.wasSimpleDrawing && !simple) {
+        for (const p of state.points) p.size = r
+      }
+      state.wasSimpleDrawing = simple
+
+      ctx.save()
+      ctx.lineCap = 'round'
+      ctx.lineJoin = isVirus ? 'miter' : 'round'
+      ctx.fillStyle = node.color
+      ctx.strokeStyle = node.color
+
+      let bigPointSize = r
+
+      if (simple) {
+        ctx.beginPath()
+        ctx.arc(x, y, r, 0, 2 * Math.PI, false)
+        ctx.closePath()
+        ctx.fill()
+      } else {
+        movePoints({
+          state,
+          x,
+          y,
+          radius: r,
+          isVirus,
+          zoom,
+          quality,
+          timestampMs: now,
+          idNum: Number(node.id) || 0,
+        })
+
+        bigPointSize = r
+        for (const p of state.points) bigPointSize = Math.max(p.size, bigPointSize)
+
+        const d = Math.max(1, Math.min(state.points.length, desired))
+
+        ctx.beginPath()
+        ctx.moveTo(state.points[0].x, state.points[0].y)
+        for (let i = 1; i <= d; i++) {
+          const e = i % d
+          ctx.lineTo(state.points[e].x, state.points[e].y)
+        }
+        ctx.closePath()
+
+        ctx.fill()
+
+        // Subtle outline
+        ctx.globalAlpha *= 0.1
+        ctx.strokeStyle = '#000000'
+        ctx.stroke()
+        ctx.globalAlpha = 1
+      }
+
+      // Skin rendering for player cells only
+      if (node.kind === 'player') {
+        const skinName = node.displayName.trim().toLowerCase()
+        const img = skinName ? getSkinImage(skinName) : null
+        if (img) {
+          ctx.save()
+          ctx.clip()
+          ctx.drawImage(img, x - bigPointSize, y - bigPointSize, 2 * bigPointSize, 2 * bigPointSize)
+          ctx.restore()
         }
 
-        const startY = Math.floor(worldTop / step) * step
-        const endY = Math.ceil(worldBottom / step) * step
-        for (let y = startY; y <= endY; y += step) {
-          const a = toScreen(worldLeft, y)
-          const b = toScreen(worldRight, y)
-          context.beginPath()
-          context.moveTo(a.x, a.y)
-          context.lineTo(b.x, b.y)
-          context.stroke()
+        // Centered name + USD (Ogar-style)
+        const nameSize = Math.max(Math.trunc(0.3 * r), 24)
+        const cached = blobTextById.get(node.id) ?? {
+          name: new UText(nameSize, '#FFFFFF', true, '#000000'),
+          usd: new UText(nameSize * 0.5, '#FFFFFF', true, '#000000'),
+        }
+        blobTextById.set(node.id, cached)
+
+        cached.name.setValue(node.displayName)
+        cached.name.setSize(nameSize)
+        cached.name.setScale(ratio)
+
+        const nameCanvas = cached.name.render()
+        const nameW = Math.trunc(nameCanvas.width * invRatio)
+        const nameH = Math.trunc(nameCanvas.height * invRatio)
+        ctx.drawImage(nameCanvas, x - Math.trunc(nameW / 2), y - Math.trunc(nameH / 2), nameW, nameH)
+
+        // USD (mass-like) below the name
+        if (r > 20 || node.isLocal) {
+          const usdText = formatUsd(node.usdValue, true)
+          cached.usd.setValue(usdText)
+          cached.usd.setSize(nameSize * 0.5)
+          cached.usd.setScale(ratio)
+
+          const usdCanvas = cached.usd.render()
+          const usdW = Math.trunc(usdCanvas.width * invRatio)
+          const usdH = Math.trunc(usdCanvas.height * invRatio)
+
+          const yUsd = node.displayName ? y + Math.trunc(usdH * 0.7) : y - Math.trunc(usdH * 0.5)
+          ctx.drawImage(usdCanvas, x - Math.trunc(usdW / 2), yUsd, usdW, usdH)
+        }
+
+        // Exit ring (economic overlay)
+        if (node.isLocal && view.hud.exitHoldProgress > 0) {
+          const progress = clamp(view.hud.exitHoldProgress, 0, 1)
+          ctx.beginPath()
+          ctx.strokeStyle = 'rgba(0,0,0,0.85)'
+          ctx.lineWidth = 4 / zoom
+          ctx.arc(x, y, r + 10, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * progress)
+          ctx.stroke()
         }
       }
 
-      drawGrid(minor, 0.06)
-      drawGrid(major, 0.12)
+      ctx.restore()
     }
 
-    // World bounds
+    ctx.restore()
+
+    // HUD (screen-space)
     {
-      const tl = toScreen(0, 0)
-      const br = toScreen(view.world.width, view.world.height)
-      context.strokeStyle = 'rgba(248, 250, 252, 0.35)'
-      context.lineWidth = 2
-      context.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y)
-    }
+      const scoreText = `Mass: ${Math.floor(view.hud.currentMass)}`
+      const exitText = view.hud.exitHoldProgress > 0 ? `Exit: ${(view.hud.exitHoldProgress * 100).toFixed(0)}%` : null
 
-    // Draw pellets
-    for (const pellet of view.pellets) {
-      const { x, y } = toScreen(pellet.x, pellet.y)
-      const r = pellet.radius * scale
-      context.beginPath()
-      context.arc(x, y, r, 0, Math.PI * 2)
-      context.fillStyle = pellet.color
-      context.fill()
+      ctx.save()
+      ctx.globalAlpha = 0.2
+      ctx.fillStyle = '#000000'
+      ctx.fillRect(10, 10, 220, exitText ? 58 : 34)
+      ctx.restore()
 
-      // Outline
-      context.strokeStyle = darkerHslColor(pellet.color, 22)
-      context.lineWidth = Math.max(1, 2 * scale)
-      context.stroke()
-
-      // USD label (above pellet)
-      if (r >= 4) {
-        const label = formatUsd(pellet.usdValue, true)
-        drawCenteredText(context, label, x, y - r - 10, {
-          font: `${Math.max(10, 11 * scale)}px system-ui, -apple-system, BlinkMacSystemFont, sans-serif`,
-          strokeWidth: Math.max(3, 4 * scale),
-        })
+      ctx.fillStyle = '#FFFFFF'
+      ctx.textAlign = 'left'
+      ctx.textBaseline = 'top'
+      ctx.font = '18px Ubuntu'
+      ctx.fillText(scoreText, 16, 16)
+      if (exitText) {
+        ctx.font = '16px Ubuntu'
+        ctx.fillText(exitText, 16, 38)
       }
-    }
-
-    // Draw viruses
-    for (const virus of view.viruses) {
-      const { x, y } = toScreen(virus.x, virus.y)
-      const r = virus.radius * scale
-      const spikes = 14
-      const outer = r * 1.15
-      const inner = r * 0.85
-
-      context.beginPath()
-      for (let i = 0; i < spikes * 2; i++) {
-        const angle = (i * Math.PI) / spikes
-        const rad = i % 2 === 0 ? outer : inner
-        const px = x + Math.cos(angle) * rad
-        const py = y + Math.sin(angle) * rad
-        if (i === 0) context.moveTo(px, py)
-        else context.lineTo(px, py)
-      }
-      context.closePath()
-      context.fillStyle = virus.color
-      context.fill()
-
-      context.strokeStyle = darkerHslColor(virus.color, 18)
-      context.lineWidth = Math.max(2, 3 * scale)
-      context.stroke()
-    }
-
-    // Draw ejected mass
-    for (const mass of view.ejectedMass) {
-      const { x, y } = toScreen(mass.x, mass.y)
-      const r = mass.radius * scale
-      context.beginPath()
-      context.arc(x, y, r, 0, Math.PI * 2)
-      context.fillStyle = mass.color
-      context.fill()
-    }
-
-    // Draw other players first
-    for (const blob of view.otherBlobs) {
-      const { x, y } = toScreen(blob.x, blob.y)
-      const r = blob.radius * scale
-      context.beginPath()
-      context.arc(x, y, r, 0, Math.PI * 2)
-      context.fillStyle = blob.color
-      context.fill()
-
-      // Outline
-      context.strokeStyle = darkerHslColor(blob.color, 18)
-      context.lineWidth = Math.max(2, 3 * scale)
-      context.stroke()
-
-      // Labels (name + USD)
-      if (r >= 10) {
-        const name = blob.displayName
-        const value = formatUsd(blob.usdValue, true)
-        drawCenteredText(context, name, x, y - r - 18, {
-          font: `${Math.max(11, 12 * scale)}px system-ui, -apple-system, BlinkMacSystemFont, sans-serif`,
-          strokeWidth: Math.max(3, 4 * scale),
-        })
-        drawCenteredText(context, value, x, y - r - 4, {
-          font: `${Math.max(10, 11 * scale)}px system-ui, -apple-system, BlinkMacSystemFont, sans-serif`,
-          fill: '#e2e8f0',
-          strokeWidth: Math.max(3, 4 * scale),
-        })
-      }
-    }
-
-    // Draw local player blobs on top
-    for (const blob of view.playerBlobs) {
-      const { x, y } = toScreen(blob.x, blob.y)
-      const r = (blob.isExiting ? blob.exitRadius : blob.radius) * scale
-      context.beginPath()
-      context.arc(x, y, r, 0, Math.PI * 2)
-      context.fillStyle = blob.color
-      context.fill()
-
-      // Outline
-      context.strokeStyle =
-        blob.isExiting && view.hud.exitHoldProgress > 0 ? 'rgba(248, 250, 252, 0.9)' : darkerHslColor(blob.color, 18)
-      context.lineWidth = Math.max(2, 3 * scale)
-      context.stroke()
-
-      // Labels (name + USD)
-      if (r >= 10) {
-        const name = blob.displayName
-        const value = formatUsd(blob.usdValue, true)
-        drawCenteredText(context, name, x, y - r - 18, {
-          font: `${Math.max(11, 12 * scale)}px system-ui, -apple-system, BlinkMacSystemFont, sans-serif`,
-          strokeWidth: Math.max(3, 4 * scale),
-        })
-        drawCenteredText(context, value, x, y - r - 4, {
-          font: `${Math.max(10, 11 * scale)}px system-ui, -apple-system, BlinkMacSystemFont, sans-serif`,
-          fill: '#e2e8f0',
-          strokeWidth: Math.max(3, 4 * scale),
-        })
-      }
-
-      // Exit ring around local blob (progress)
-      if (blob.isExiting && view.hud.exitHoldProgress > 0) {
-        const progress = Math.max(0, Math.min(1, view.hud.exitHoldProgress))
-        context.beginPath()
-        context.strokeStyle = 'rgba(248, 250, 252, 0.9)'
-        context.lineWidth = Math.max(2, 4 * scale)
-        context.arc(x, y, r + 10 * scale, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * progress)
-        context.stroke()
-      }
-    }
-
-    // HUD: top-left debug text + bottom-center local worth + leaderboard
-    context.fillStyle = '#e5e7eb'
-    context.font = '14px system-ui, -apple-system, BlinkMacSystemFont, sans-serif'
-    context.textAlign = 'left'
-    context.textBaseline = 'top'
-
-    const lines: string[] = []
-    lines.push(`Mass: ${Math.floor(view.hud.currentMass)}`)
-    if (view.hud.exitHoldProgress > 0) {
-      lines.push(`Exit: ${(view.hud.exitHoldProgress * 100).toFixed(0)}%`)
-    }
-
-    let y = 12
-    for (const line of lines) {
-      context.fillText(line, 12, y)
-      y += 18
     }
 
     // Bottom-center local worth
     {
       const text = formatUsd(view.hud.localUsdWorth, true)
-      context.font = '18px system-ui, -apple-system, BlinkMacSystemFont, sans-serif'
-      drawCenteredText(context, text, width / 2, height - 44, {
-        font: '18px system-ui, -apple-system, BlinkMacSystemFont, sans-serif',
-        strokeWidth: 5,
-      })
+      bottomWorthText.setValue(text)
+      bottomWorthText.setScale(1)
+      const c = bottomWorthText.render()
+      const w = c.width
+      const h = c.height
+      ctx.drawImage(c, width / 2 - w / 2, height - 56, w, h)
     }
 
-    // Leaderboard (top-right)
+    // Leaderboard (top-right) — keep our existing panel
     {
       const entries = view.hud.leaderboard
       const maxRows = Math.min(entries.length, 12)
@@ -310,29 +580,30 @@ export const bootstrapRenderer = (
       const rowH = 18
       const panelH = 28 + maxRows * rowH + 12
 
-      context.fillStyle = 'rgba(0, 0, 0, 0.35)'
-      context.strokeStyle = 'rgba(255,255,255,0.10)'
-      context.lineWidth = 1
-      context.beginPath()
-      context.roundRect(panelX, panelY, panelW, panelH, 14)
-      context.fill()
-      context.stroke()
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.35)'
+      ctx.strokeStyle = 'rgba(255,255,255,0.10)'
+      ctx.lineWidth = 1
+      ctx.beginPath()
+      ctx.roundRect(panelX, panelY, panelW, panelH, 14)
+      ctx.fill()
+      ctx.stroke()
 
-      context.textAlign = 'left'
-      context.textBaseline = 'top'
-      context.font = '12px system-ui, -apple-system, BlinkMacSystemFont, sans-serif'
-      context.fillStyle = '#f8fafc'
-      context.fillText('Leaderboard', panelX + 12, panelY + 10)
+      ctx.textAlign = 'left'
+      ctx.textBaseline = 'top'
+      ctx.font = '12px Ubuntu'
+      ctx.fillStyle = '#FFFFFF'
+      ctx.fillText('Leaderboard', panelX + 12, panelY + 10)
 
       for (let i = 0; i < maxRows; i++) {
         const e = entries[i]
         const yRow = panelY + 28 + i * rowH
-        context.fillStyle = e.isLocal ? 'rgba(158, 252, 255, 0.95)' : 'rgba(248,250,252,0.9)'
+        ctx.fillStyle = e.isLocal ? 'rgba(255,170,170,0.95)' : 'rgba(255,255,255,0.9)'
+        ctx.font = '12px Ubuntu'
         const name = e.displayName.length > 16 ? `${e.displayName.slice(0, 15)}…` : e.displayName
-        context.fillText(`${i + 1}. ${name}`, panelX + 12, yRow)
-        context.textAlign = 'right'
-        context.fillText(formatUsd(e.usdValue, true), panelX + panelW - 12, yRow)
-        context.textAlign = 'left'
+        ctx.fillText(`${i + 1}. ${name}`, panelX + 12, yRow)
+        ctx.textAlign = 'right'
+        ctx.fillText(formatUsd(e.usdValue, true), panelX + panelW - 12, yRow)
+        ctx.textAlign = 'left'
       }
     }
 

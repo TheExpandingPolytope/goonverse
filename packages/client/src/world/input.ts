@@ -15,6 +15,12 @@ export const attachInputListeners = (
   canvas: HTMLCanvasElement,
   controller: WorldInputController,
 ): ListenerCleanup => {
+  const handleWheel = (event: WheelEvent) => {
+    // Use wheel for zooming the view; prevent page scroll.
+    event.preventDefault()
+    controller.onWheelZoom({ deltaY: event.deltaY })
+  }
+
   const handlePointerMove = (event: MouseEvent) => {
     const rect = canvas.getBoundingClientRect()
     const normalized = {
@@ -62,10 +68,12 @@ export const attachInputListeners = (
   window.addEventListener('mousemove', handlePointerMove)
   window.addEventListener('keydown', handleKeyDown)
   window.addEventListener('keyup', handleKeyUp)
+  canvas.addEventListener('wheel', handleWheel, { passive: false })
 
   return () => {
     window.removeEventListener('mousemove', handlePointerMove)
     window.removeEventListener('keydown', handleKeyDown)
     window.removeEventListener('keyup', handleKeyUp)
+    canvas.removeEventListener('wheel', handleWheel)
   }
 }
