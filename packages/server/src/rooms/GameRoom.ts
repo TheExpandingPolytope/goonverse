@@ -18,6 +18,7 @@ import {
   applyDepositToBalances,
   creditPelletReserveWei,
   getPelletReserveWei,
+  releaseExitReservation,
   reserveExitLiquidityWei,
   trySpendPelletReserveWei,
 } from "../services/balance.js";
@@ -43,7 +44,9 @@ import type { PlayerSim, WorldNode } from "./sim/types.js";
  * when using RedisDriver for cross-machine room discovery.
  */
 export class GameRoom extends Room<GameState> {
-  private exitHoldMs: number = 3000;
+  // NOTE: For testing/dev we keep exits fast. In production this can be overridden
+  // by the indexed server config (and should be longer for safety/UX).
+  private exitHoldMs: number = config.nodeEnv === "production" ? 3000 : 600;
   private massPerEth: number = 100;
   private sessionNonce: number = 0;
   private buyInAmount: string = "0";
@@ -129,6 +132,15 @@ export class GameRoom extends Room<GameState> {
       this.buyInAmount = serverConfig.buyInAmount;
       this.state.exitHoldMs = serverConfig.exitHoldMs;
       this.state.massPerEth = serverConfig.massPerEth;
+    }
+
+    // TEMP (testing): make exiting faster in dev.
+    if (config.nodeEnv !== "production") {
+      this.exitHoldMs = 600;
+      this.state.exitHoldMs = this.exitHoldMs;
+    } else if (!this.state.exitHoldMs) {
+      // Ensure state matches the active hold duration even if serverConfig is missing.
+      this.state.exitHoldMs = this.exitHoldMs;
     }
 
     await this.refreshBalancesAndMetadata();
@@ -366,42 +378,55 @@ export class GameRoom extends Room<GameState> {
     const sim = this.engine.getPlayer(client.sessionId);
     if (!sim || !sim.alive) return;
 
-    const userData = client.userData as PlayerUserData;
-    const sessionId = generateSessionId(userData.wallet, ++this.sessionNonce);
+    let exitSessionId: `0x${string}` | null = null;
+    let reservedOk = false;
+    try {
+      const userData = client.userData as PlayerUserData;
+      const sessionId = generateSessionId(userData.wallet, ++this.sessionNonce);
+      exitSessionId = sessionId;
 
-    const totalMass = this.engine.getPlayerTotalMass(client.sessionId);
-    const payoutWei = massToPayoutAmount(totalMass, this.massPerEth);
+      const totalMass = this.engine.getPlayerTotalMass(client.sessionId);
+      const payoutWei = massToPayoutAmount(totalMass, this.massPerEth);
 
-    const reserved = await reserveExitLiquidityWei({
-      serverId: config.serverId,
-      sessionId,
-      payoutWei,
-      ttlSeconds: config.exitTicketTtlSeconds,
-    });
+      const reserved = await reserveExitLiquidityWei({
+        serverId: config.serverId,
+        sessionId,
+        payoutWei,
+        ttlSeconds: config.exitTicketTtlSeconds,
+      });
+      reservedOk = reserved;
 
-    if (!reserved) {
-      client.send("exitError", { message: "Server temporarily out of funds, please try again." });
+      if (!reserved) {
+        client.send("exitError", { message: "Server temporarily out of funds, please try again." });
+        this.cancelExit(client.sessionId);
+        return;
+      }
+
+      const ticket = await createExitTicket(sessionId, userData.wallet, payoutWei);
+      await storeExitTicket(this.presence, ticket);
+
+      const serializedTicket: SerializedExitTicket = {
+        serverId: ticket.serverId,
+        sessionId: ticket.sessionId,
+        player: ticket.player,
+        payout: ticket.payout.toString(),
+        deadline: ticket.deadline.toString(),
+        signature: ticket.signature,
+      };
+
+      client.send("exitTicket", serializedTicket);
+      console.log(`Player ${client.sessionId} exited with payout ${payoutWei.toString()}`);
+
+      sim.alive = false;
+      this.removePlayer(client.sessionId);
+    } catch (error) {
+      console.error(`[GameRoom] completeExit failed for ${client.sessionId}:`, error);
+      if (reservedOk && exitSessionId) {
+        void releaseExitReservation(config.serverId, exitSessionId);
+      }
+      client.send("exitError", { message: "Exit failed, please try again." });
       this.cancelExit(client.sessionId);
-      return;
     }
-
-    const ticket = await createExitTicket(sessionId, userData.wallet, payoutWei);
-    await storeExitTicket(this.presence, ticket);
-
-    const serializedTicket: SerializedExitTicket = {
-      serverId: ticket.serverId,
-      sessionId: ticket.sessionId,
-      player: ticket.player,
-      payout: ticket.payout.toString(),
-      deadline: ticket.deadline.toString(),
-      signature: ticket.signature,
-    };
-
-    client.send("exitTicket", serializedTicket);
-    console.log(`Player ${client.sessionId} exited with payout ${payoutWei.toString()}`);
-
-    sim.alive = false;
-    this.removePlayer(client.sessionId);
   }
 
   /**
