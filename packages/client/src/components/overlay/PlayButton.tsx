@@ -175,8 +175,13 @@ export const PlayButton = ({ servers, displayName }: PlayButtonProps) => {
       console.log('[PlayButton] Join eligibility:', eligibility)
 
       let depositId: string | undefined
+      let roomId: string | undefined
 
-      if (eligibility.canJoin && eligibility.depositId) {
+      if (eligibility.canJoin && eligibility.action === 'reconnect') {
+        // Has a live entity - reconnect without depositing
+        console.log('[PlayButton] Reconnecting to existing entity')
+        roomId = eligibility.roomId
+      } else if (eligibility.canJoin && eligibility.depositId) {
         // Has unused deposit - can join directly
         console.log('[PlayButton] Using existing deposit:', eligibility.depositId)
         depositId = eligibility.depositId
@@ -205,6 +210,7 @@ export const PlayButton = ({ servers, displayName }: PlayButtonProps) => {
         {
           serverId: selectedServer.serverId,
           buyInEth,
+          roomId,
           depositId,
           wallet: activeAddress,
           wsEndpoint: selectedServer.wsEndpoint,

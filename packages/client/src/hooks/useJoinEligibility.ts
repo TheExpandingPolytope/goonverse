@@ -4,6 +4,7 @@ import { env } from '@/lib/env'
 export interface JoinEligibilityResult {
   canJoin: boolean
   action?: 'spawn' | 'reconnect'
+  roomId?: string
   depositId?: string
   spawnAmount?: string
   reason?: string

@@ -28,6 +28,8 @@ type JoinGameOptions = {
   serverId: string
   /** Buy-in amount in ETH */
   buyInEth: number
+  /** Optional roomId to join directly (reconnect path) */
+  roomId?: string
   /** Deposit transaction ID (after on-chain deposit) */
   depositId?: string
   /** Player's wallet address */
@@ -111,13 +113,18 @@ export const GameClientProvider = ({ children }: PropsWithChildren) => {
         // See: https://docs.colyseus.io/client
         client.auth.token = accessToken
 
-        const joinedRoom = await client.joinOrCreate('game', {
+        const joinOptions = {
           serverId: options.serverId,
           buyInEth: options.buyInEth,
           depositId: options.depositId,
           wallet: options.wallet,
           displayName: options.displayName,
-        })
+        }
+
+        const joinedRoom = options.roomId
+          ? await client.joinById(options.roomId, joinOptions)
+          : await client.joinOrCreate('game', joinOptions)
+
         roomRef.current = joinedRoom
         setRoom(joinedRoom)
         setSessionId(joinedRoom.sessionId)
@@ -177,6 +184,7 @@ export const GameClientProvider = ({ children }: PropsWithChildren) => {
         return true
       } catch (error) {
         console.error('[GameClient] Failed to join game:', error)
+
         setPhase('idle')
         return false
       }

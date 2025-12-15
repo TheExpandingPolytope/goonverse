@@ -7,7 +7,7 @@ import express from "express";
 import { config as envConfig } from "./config.js";
 import { GameRoom } from "./rooms/GameRoom.js";
 import { verifyPrivyToken, getPrivyUser, getPrimaryWallet } from "./auth/privy.js";
-import { getPlayerDeposits } from "./services/ponder.js";
+import { getPlayerDeposits, serverIdToBytes32 } from "./services/ponder.js";
 import { isDepositUsed } from "./services/depositTracker.js";
 import { startBalanceSync } from "./services/balance.js";
 
@@ -195,10 +195,19 @@ export default config({
         }
 
         const normalizedWallet = wallet.toLowerCase() as `0x${string}`;
+        const targetServerIdB32 = serverIdToBytes32(serverId).toLowerCase();
 
         // 1. RECONNECT PATH: Check if any active GameRoom already has a living entity for this wallet.
         try {
-          const rooms = await matchMaker.query({ name: "game", metadata: { serverId } });
+          const allRooms = await matchMaker.query({ name: "game" });
+          const roomsMatchingServer = allRooms.filter((room) => {
+            const sid = room.metadata?.serverId;
+            if (typeof sid !== "string" || sid.length === 0) return false;
+            return serverIdToBytes32(sid).toLowerCase() === targetServerIdB32;
+          });
+
+          // If metadata filtering is incomplete for any reason, fall back to scanning all rooms.
+          const rooms = roomsMatchingServer.length > 0 ? roomsMatchingServer : allRooms;
 
           for (const room of rooms) {
             try {
@@ -215,6 +224,7 @@ export default config({
                 res.json({
                   canJoin: true,
                   action: "reconnect",
+                  roomId: room.roomId,
                   wallet,
                   serverId,
                 });
