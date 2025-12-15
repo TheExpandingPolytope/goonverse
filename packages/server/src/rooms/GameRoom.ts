@@ -327,11 +327,14 @@ export class GameRoom extends Room<GameState> {
     const mouseX = Number(message.x) || 0;
     const mouseY = Number(message.y) || 0;
 
+    const splitPressed = next.space && !prev.space;
+    const ejectPressed = next.w && !prev.w;
+
     this.engine.setInput(client.sessionId, {
       mouseX,
       mouseY,
-      splitPressed: next.space && !prev.space,
-      ejectPressed: next.w && !prev.w,
+      splitPressed,
+      ejectPressed,
     });
 
     // Exit-hold overlay (economic) is tracked outside the engine
