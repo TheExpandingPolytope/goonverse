@@ -71,7 +71,7 @@ You can always override the address with `WORLD_CONTRACT_ADDRESS` if needed.
   - `PORT`
   - `NODE_ENV=production`
   - `DATABASE_URL` (Railway Postgres)
-  - `DATABASE_SCHEMA` (e.g. `ponder` or `public`)
+  - `DATABASE_SCHEMA` (recommended: unique per env/chain, e.g. `ponder_baseSepolia` or `ponder_base`)
   - `PONDER_CHAIN` (`base` | `baseSepolia` | `anvil`)
   - `PONDER_RPC_URL_8453` and/or `PONDER_RPC_URL_84532` (depending on chain)
 - **Optional env**:
