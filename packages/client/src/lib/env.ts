@@ -12,7 +12,7 @@ const requireEnv = (value: EnvValue, name: string): string => {
 
 // Eagerly import all Ignition deployment address files so we can map by chain id
 const deploymentFiles = import.meta.glob(
-  '../../../contract/ignition/deployments/**/deployed_addresses.json',
+  '../../contract/ignition/deployments/**/deployed_addresses.json',
   { eager: true, import: 'default' }
 ) as Record<string, Record<string, string>>
 

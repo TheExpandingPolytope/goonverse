@@ -24,12 +24,27 @@ const CHAIN_ID_ANVIL = 31337;
 const chainId = parseInt(optionalEnv("CHAIN_ID", `${CHAIN_ID_ANVIL}`), 10);
 
 function loadDeploymentAddresses(chain: number): Record<string, string> {
-  const target = path.resolve(__dirname, `../../contract/ignition/deployments/chain-${chain}/deployed_addresses.json`);
-  if (!fs.existsSync(target)) {
-    throw new Error(`Deployment file not found for chainId ${chain}: ${target}`);
+  const overrideDir = process.env.IGNITION_DEPLOYMENTS_DIR;
+  const candidates = [
+    overrideDir
+      ? path.resolve(overrideDir, `chain-${chain}/deployed_addresses.json`)
+      : null,
+    // Preferred for Railway/subdir Docker builds: packages/server/contract/...
+    path.resolve(__dirname, `../contract/ignition/deployments/chain-${chain}/deployed_addresses.json`),
+    // Fallback for monorepo dev: packages/contract/...
+    path.resolve(__dirname, `../../contract/ignition/deployments/chain-${chain}/deployed_addresses.json`),
+  ].filter(Boolean) as string[];
+
+  for (const target of candidates) {
+    if (fs.existsSync(target)) {
+      const raw = fs.readFileSync(target, "utf-8");
+      return JSON.parse(raw) as Record<string, string>;
+    }
   }
-  const raw = fs.readFileSync(target, "utf-8");
-  return JSON.parse(raw) as Record<string, string>;
+
+  throw new Error(
+    `Deployment file not found for chainId ${chain}. Tried:\n${candidates.map((c) => `- ${c}`).join("\n")}`
+  );
 }
 
 function resolveContractAddress(contractName: string): string {
@@ -49,7 +64,8 @@ export const config = {
   nodeEnv: optionalEnv("NODE_ENV", "development"),
 
   // Redis
-  redisUri: optionalEnv("REDIS_URI", "redis://localhost:6379"),
+  // Standardize on REDIS_URL for Railway; keep REDIS_URI as a backwards-compatible fallback.
+  redisUri: optionalEnv("REDIS_URL", optionalEnv("REDIS_URI", "redis://localhost:6379")),
 
   // Privy
   privyAppId: requireEnv("PRIVY_APP_ID"),
@@ -63,7 +79,8 @@ export const config = {
   controllerPrivateKey: requireEnv("CONTROLLER_PRIVATE_KEY") as `0x${string}`,
 
   // Contract
-  worldContractAddress: resolveContractAddress("World") as `0x${string}`,
+  worldContractAddress: (process.env.WORLD_CONTRACT_ADDRESS ??
+    resolveContractAddress("World")) as `0x${string}`,
 
   // Exit Tickets
   exitTicketTtlSeconds: parseInt(optionalEnv("EXIT_TICKET_TTL_SECONDS", "86400"), 10),

@@ -1,4 +1,5 @@
 import { buildModule } from "@nomicfoundation/hardhat-ignition/modules";
+import hre from "hardhat";
 
 export default buildModule("World", (m) => {
   const deployer = m.getAccount(0);
@@ -68,7 +69,9 @@ export default buildModule("World", (m) => {
   }
 
   // Fund test wallet with ETH for local development
-  m.send("FundTestWallet", "0x40521D8831cf2df0BF3550b762dbAc89786BE6E3", 100n * 10n ** 18n);
+  if (hre.network.name === "localhost" || hre.network.name === "hardhat") {
+    m.send("FundTestWallet", "0x40521D8831cf2df0BF3550b762dbAc89786BE6E3", 100n * 10n ** 18n);
+  }
 
   return { world };
 });

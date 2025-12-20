@@ -85,7 +85,7 @@ procs:
       - dev
     env:
       PORT: "2567"
-      REDIS_URI: "redis://localhost:6379"
+      REDIS_URL: "redis://localhost:6379"
       PONDER_URL: "http://localhost:42069"
       # These need to be set in packages/server/.env
       # PRIVY_APP_ID: ""

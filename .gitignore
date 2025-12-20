@@ -1,3 +1,6 @@
 node_modules
 packages/contract/cache/
 .tmp/
+.env
+.env.*
+!**/.env.example

@@ -6,14 +6,15 @@
     "dev:infra": "mprocs postgres redis hardhat",
     "dev:backend": "mprocs ponder server",
     "install:all": "npm install && npm install --prefix packages/contract && npm install --prefix packages/indexer && npm install --prefix packages/server",
+    "sync:ignition": "node scripts/sync-ignition-deployments.mjs",
     "typecheck": "npm run typecheck --prefix packages/server",
     "test:contract": "npm test --prefix packages/contract"
   },
   "devDependencies": {
+    "dotenv": "^17.2.3",
     "mprocs": "^0.7.1"
   },
   "engines": {
     "node": ">=18.14"
   }
 }
-

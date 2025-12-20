@@ -12,11 +12,26 @@ const __dirname = path.dirname(__filename);
 const activeChain = process.env.PONDER_CHAIN || "anvil";
 
 function loadDeploymentAddresses(chain: number): Record<string, string> {
-  const target = path.resolve(__dirname, `../contract/ignition/deployments/chain-${chain}/deployed_addresses.json`);
-  if (!fs.existsSync(target)) {
-    throw new Error(`Deployment file not found for chainId ${chain}: ${target}`);
+  const overrideDir = process.env.IGNITION_DEPLOYMENTS_DIR;
+  const candidates = [
+    overrideDir
+      ? path.resolve(overrideDir, `chain-${chain}/deployed_addresses.json`)
+      : null,
+    // Preferred for Railway/subdir Docker builds: packages/indexer/contract/...
+    path.resolve(__dirname, `./contract/ignition/deployments/chain-${chain}/deployed_addresses.json`),
+    // Fallback for monorepo dev: packages/contract/...
+    path.resolve(__dirname, `../contract/ignition/deployments/chain-${chain}/deployed_addresses.json`),
+  ].filter(Boolean) as string[];
+
+  for (const target of candidates) {
+    if (fs.existsSync(target)) {
+      return JSON.parse(fs.readFileSync(target, "utf-8")) as Record<string, string>;
+    }
   }
-  return JSON.parse(fs.readFileSync(target, "utf-8")) as Record<string, string>;
+
+  throw new Error(
+    `Deployment file not found for chainId ${chain}. Tried:\n${candidates.map((c) => `- ${c}`).join("\n")}`
+  );
 }
 
 function resolveContractAddress(chainId: number, contractName: string): `0x${string}` {
@@ -45,7 +60,9 @@ const envChainId = Number(process.env.PONDER_CHAIN_ID);
 const activeChainKey = (activeChain in chainIdByName ? activeChain : "anvil") as keyof typeof chainIdByName;
 const chainIdFromName: number = chainIdByName[activeChainKey];
 const activeChainId = Number.isFinite(envChainId) ? envChainId : chainIdFromName;
-const worldAddress = resolveContractAddress(activeChainId, "World");
+const worldAddress =
+  (process.env.WORLD_CONTRACT_ADDRESS as `0x${string}` | undefined) ??
+  resolveContractAddress(activeChainId, "World");
 
 // Chain-specific configurations
 const chainConfigs = {
