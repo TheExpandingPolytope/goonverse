@@ -11,6 +11,7 @@ const requireEnv = (value: EnvValue, name: string): string => {
 }
 
 // Eagerly import all Ignition deployment address files so we can map by chain id
+// Note: this is optional. In Railway subdirectory builds, the `contract/` folder may not exist.
 const deploymentFiles = import.meta.glob(
   '../../contract/ignition/deployments/**/deployed_addresses.json',
   { eager: true, import: 'default' }
@@ -34,7 +35,10 @@ const chainId = parseInt(requireEnv(import.meta.env.VITE_CHAIN_ID, 'VITE_CHAIN_I
 const resolveContractAddress = (contractName: string): string => {
   const addresses = ADDRESS_BOOK[chainId]
   if (!addresses) {
-    throw new Error(`No deployment addresses found for chainId ${chainId}. Ensure Ignition deployment exists.`)
+    throw new Error(
+      `No Ignition deployment addresses found for chainId ${chainId}. ` +
+        `Set VITE_WORLD_CONTRACT_ADDRESS in your environment, or include contract ignition deployment files in the build context.`
+    )
   }
 
   // Exact match
@@ -55,7 +59,9 @@ export const env = {
   // Required
   httpOrigin: requireEnv(import.meta.env.VITE_HTTP_ORIGIN, 'VITE_HTTP_ORIGIN'),
   chainId,
-  worldContractAddress: resolveContractAddress('World') as `0x${string}`,
+  // Prefer explicit env (works on Railway with subdir builds); fall back to Ignition address book if present.
+  worldContractAddress: (resolve(import.meta.env.VITE_WORLD_CONTRACT_ADDRESS, '') ||
+    resolveContractAddress('World')) as `0x${string}`,
   privyAppId: requireEnv(import.meta.env.VITE_PRIVY_APP_ID, 'VITE_PRIVY_APP_ID'),
 
   // Optional telemetry feeds

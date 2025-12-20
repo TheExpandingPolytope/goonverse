@@ -4,9 +4,6 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 
-# Needed so Vite can bundle contract addresses by chain id at build time.
-COPY contract ./contract
-
 COPY . .
 RUN npm run build
 

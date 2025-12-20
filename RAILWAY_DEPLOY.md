@@ -33,6 +33,7 @@ You can always override the address with `WORLD_CONTRACT_ADDRESS` if needed.
   - `VITE_CHAIN_ID`
   - `VITE_HTTP_ORIGIN`
   - `VITE_PRIVY_APP_ID`
+  - `VITE_WORLD_CONTRACT_ADDRESS` (recommended for Railway)
 - **Optional build-time env**:
   - `VITE_PONDER_HTTP_URL`
   - `VITE_PONDER_WS_URL`
