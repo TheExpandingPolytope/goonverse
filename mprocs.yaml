@@ -6,7 +6,7 @@ procs:
       - run
       - --rm
       - --name
-      - goonverse-postgres
+      - globs-fun-postgres
       - -e
       - POSTGRES_USER=ponder
       - -e
@@ -24,7 +24,7 @@ procs:
       - run
       - --rm
       - --name
-      - goonverse-redis
+      - globs-fun-redis
       - -p
       - "6379:6379"
       - redis:7-alpine
@@ -37,7 +37,7 @@ procs:
       - run
       - --rm
       - --name
-      - goonverse-redisinsight
+      - globs-fun-redisinsight
       - -p
       - "5540:5540"
       - --add-host
