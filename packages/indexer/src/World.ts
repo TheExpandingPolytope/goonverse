@@ -5,7 +5,24 @@ import { servers, deposits, exits } from "ponder:schema";
  * Handle AddedServer event - create new server entry
  */
 ponder.on("World:AddedServer", async ({ event, context }) => {
-  const { serverId, controller, buyInAmount, massPerEth, rakeShareBps, worldShareBps, exitHoldMs } = event.args;
+  const args = event.args as any;
+  const {
+    serverId,
+    controller,
+    buyInAmount,
+    massPerEth,
+    exitHoldMs,
+  }: {
+    serverId: `0x${string}`;
+    controller: `0x${string}`;
+    buyInAmount: bigint;
+    massPerEth: number;
+    exitHoldMs: number;
+  } = args;
+
+  // Back-compat: older ABI names used developerFeeBps/worldFeeBps.
+  const rakeShareBps: number = Number(args.rakeShareBps ?? args.developerFeeBps);
+  const worldShareBps: number = Number(args.worldShareBps ?? args.worldFeeBps);
 
   await context.db.insert(servers).values({
     id: serverId,
@@ -27,7 +44,23 @@ ponder.on("World:AddedServer", async ({ event, context }) => {
  * Handle UpdatedServer event - update existing server config
  */
 ponder.on("World:UpdatedServer", async ({ event, context }) => {
-  const { serverId, controller, buyInAmount, massPerEth, rakeShareBps, worldShareBps, exitHoldMs } = event.args;
+  const args = event.args as any;
+  const {
+    serverId,
+    controller,
+    buyInAmount,
+    massPerEth,
+    exitHoldMs,
+  }: {
+    serverId: `0x${string}`;
+    controller: `0x${string}`;
+    buyInAmount: bigint;
+    massPerEth: number;
+    exitHoldMs: number;
+  } = args;
+
+  const rakeShareBps: number = Number(args.rakeShareBps ?? args.developerFeeBps);
+  const worldShareBps: number = Number(args.worldShareBps ?? args.worldFeeBps);
 
   await context.db
     .update(servers, { id: serverId })
