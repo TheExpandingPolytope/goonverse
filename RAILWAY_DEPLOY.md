@@ -28,7 +28,7 @@ You can always override the address with `WORLD_CONTRACT_ADDRESS` if needed.
 
 - **Root directory**: `packages/client`
 - **Dockerfile**: `packages/client/Dockerfile`
-- **Port**: listens on `$PORT` (Nginx template uses `${PORT}`)
+- **Port**: listens on `$PORT` (served by Node `serve`)
 - **Required build-time env**:
   - `VITE_CHAIN_ID`
   - `VITE_HTTP_ORIGIN`

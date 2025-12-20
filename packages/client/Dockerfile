@@ -10,15 +10,18 @@ COPY contract ./contract
 COPY . .
 RUN npm run build
 
-FROM nginx:1.27-alpine AS runner
+FROM node:20-alpine AS runner
+WORKDIR /app
 
-# The official nginx image will envsubst templates in /etc/nginx/templates at startup.
+ENV NODE_ENV=production
 ENV PORT=3000
-COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
 
-COPY --from=build /app/dist /usr/share/nginx/html
+# Simple, reliable static hosting with SPA fallback (-s)
+RUN npm install -g serve@14.2.4
+
+COPY --from=build /app/dist ./dist
 
 EXPOSE 3000
-CMD ["nginx", "-g", "daemon off;"]
+CMD ["sh", "-c", "serve -s dist -l ${PORT:-3000}"]
 
 
