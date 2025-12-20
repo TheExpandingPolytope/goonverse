@@ -8,7 +8,7 @@ export interface Deposit {
     amount: bigint;
     spawnAmount: bigint;
     worldAmount: bigint;
-    rakeAmount: bigint;
+    developerAmount: bigint;
     blockNumber: bigint;
     timestamp: bigint;
     txHash: `0x${string}`;
@@ -62,8 +62,8 @@ export declare function getServer(serverId: string): Promise<{
     controller: `0x${string}`;
     buyInAmount: string;
     massPerEth: number;
-    rakeShareBps: number;
-    worldShareBps: number;
+    developerFeeBps: number;
+    worldFeeBps: number;
     exitHoldMs: number;
     isActive: boolean;
 } | null>;

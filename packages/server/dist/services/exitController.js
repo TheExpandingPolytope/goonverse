@@ -2,10 +2,17 @@ import { createWalletClient, http, keccak256, encodePacked, } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { base, baseSepolia } from "viem/chains";
 import { config } from "../config.js";
+import { serverIdToBytes32 } from "./ponder.js";
 /**
  * The controller account derived from the private key
  */
 const controllerAccount = privateKeyToAccount(config.controllerPrivateKey);
+/**
+ * Canonical bytes32 serverId used for signing + storage.
+ *
+ * In dev we often use human IDs like "world_001"; on-chain expects bytes32.
+ */
+const serverIdBytes32 = serverIdToBytes32(config.serverId);
 /**
  * Wallet client for signing
  */
@@ -48,7 +55,7 @@ export async function createExitTicket(sessionId, player, payout, deadlineSecond
     // Create the message hash matching World.sol's abi.encodePacked format
     const messageHash = keccak256(encodePacked(["address", "bytes32", "bytes32", "address", "uint256", "uint256"], [
         config.worldContractAddress,
-        config.serverId,
+        serverIdBytes32,
         sessionId,
         player,
         payout,
@@ -59,7 +66,7 @@ export async function createExitTicket(sessionId, player, payout, deadlineSecond
         message: { raw: messageHash },
     });
     return {
-        serverId: config.serverId,
+        serverId: serverIdBytes32,
         sessionId,
         player,
         payout,
@@ -73,7 +80,7 @@ export async function createExitTicket(sessionId, player, payout, deadlineSecond
  * Format: keccak256(serverId, player, nonce, timestamp)
  */
 export function generateSessionId(player, nonce) {
-    return keccak256(encodePacked(["bytes32", "address", "uint256", "uint256"], [config.serverId, player, BigInt(nonce), BigInt(Date.now())]));
+    return keccak256(encodePacked(["bytes32", "address", "uint256", "uint256"], [serverIdBytes32, player, BigInt(nonce), BigInt(Date.now())]));
 }
 /**
  * Convert mass to payout amount

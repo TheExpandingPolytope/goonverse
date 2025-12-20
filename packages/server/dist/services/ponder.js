@@ -35,7 +35,7 @@ export async function getDeposit(depositId) {
         amount
         spawnAmount
         worldAmount
-        rakeAmount
+        developerAmount
         blockNumber
         timestamp
         txHash
@@ -71,7 +71,7 @@ export async function getPlayerDeposits(serverId, player) {
           amount
           spawnAmount
           worldAmount
-          rakeAmount
+          developerAmount
           blockNumber
           timestamp
           txHash
@@ -140,7 +140,18 @@ export async function getPlayerExits(serverId, player) {
 export async function verifyDeposit(serverId, depositId, player) {
     // Convert serverId to bytes32 hex for comparison with indexer data.
     const serverIdHex = serverIdToBytes32(serverId);
-    const deposit = await getDeposit(depositId);
+    // Ponder can lag behind the chain briefly after a fresh deposit is mined.
+    // To reduce "deposit succeeded but join fails" flakiness, poll for a short window.
+    const maxAttempts = 10;
+    const delayMs = 350;
+    let deposit = null;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        deposit = await getDeposit(depositId);
+        if (deposit)
+            break;
+        // Only retry when not found; any other mismatch is handled below.
+        await new Promise((r) => setTimeout(r, delayMs));
+    }
     if (!deposit) {
         console.log(`Deposit ${depositId} not found`);
         return null;
@@ -187,8 +198,8 @@ export async function getServer(serverId) {
         controller
         buyInAmount
         massPerEth
-        rakeShareBps
-        worldShareBps
+        developerFeeBps
+        worldFeeBps
         exitHoldMs
         isActive
       }
@@ -209,7 +220,7 @@ function normalizeDeposit(raw) {
         amount: BigInt(raw.amount ?? 0n),
         spawnAmount: BigInt(raw.spawnAmount ?? 0n),
         worldAmount: BigInt(raw.worldAmount ?? 0n),
-        rakeAmount: BigInt(raw.rakeAmount ?? 0n),
+        developerAmount: BigInt(raw.developerAmount ?? 0n),
         blockNumber: BigInt(raw.blockNumber ?? 0n),
         timestamp: BigInt(raw.timestamp ?? 0n),
     };

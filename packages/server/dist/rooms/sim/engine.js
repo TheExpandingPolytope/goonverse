@@ -129,7 +129,14 @@ export class FfaEngine {
         const player = this.players.get(sessionId);
         if (!player)
             return;
+        // IMPORTANT: split/eject are edge triggers that must not be cleared by later
+        // input packets before the next simulation tick consumes them.
+        // We "latch" true until Engine.step() clears them after use.
         player.input = { ...player.input, ...input };
+        if (input.splitPressed)
+            player.input.splitPressed = true;
+        if (input.ejectPressed)
+            player.input.ejectPressed = true;
     }
     /**
      * Main tick step (50ms).

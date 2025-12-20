@@ -3,8 +3,7 @@ import { GameState } from "./schema/GameState.js";
 import { verifyPrivyToken, getPrivyUser, getPrimaryWallet } from "../auth/privy.js";
 import { verifyDeposit, getServer, serverIdToBytes32 } from "../services/ponder.js";
 import { createExitTicket, generateSessionId, massToPayoutAmount, storeExitTicket, payoutAmountToMass, } from "../services/exitController.js";
-import { tryUseDeposit } from "../services/depositTracker.js";
-import { applyDepositToBalances, creditPelletReserveWei, getPelletReserveWei, reserveExitLiquidityWei, trySpendPelletReserveWei, } from "../services/balance.js";
+import { applyDepositToBalances, creditPelletReserveWei, getPelletReserveWei, releaseExitReservation, reserveExitLiquidityWei, trySpendPelletReserveWei, tryUseDeposit, } from "../services/accounting.js";
 import { config } from "../config.js";
 // FFA parity simulation engine
 import { FFA_CONFIG } from "./sim/config.js";
@@ -25,7 +24,9 @@ import { FfaEngine } from "./sim/engine.js";
 export class GameRoom extends Room {
     constructor() {
         super(...arguments);
-        this.exitHoldMs = 3000;
+        // NOTE: For testing/dev we keep exits fast. In production this can be overridden
+        // by the indexed server config (and should be longer for safety/UX).
+        this.exitHoldMs = config.nodeEnv === "production" ? 3000 : 600;
         this.massPerEth = 100;
         this.sessionNonce = 0;
         this.buyInAmount = "0";
@@ -101,6 +102,15 @@ export class GameRoom extends Room {
             this.buyInAmount = serverConfig.buyInAmount;
             this.state.exitHoldMs = serverConfig.exitHoldMs;
             this.state.massPerEth = serverConfig.massPerEth;
+        }
+        // TEMP (testing): make exiting faster in dev.
+        if (config.nodeEnv !== "production") {
+            this.exitHoldMs = 600;
+            this.state.exitHoldMs = this.exitHoldMs;
+        }
+        else if (!this.state.exitHoldMs) {
+            // Ensure state matches the active hold duration even if serverConfig is missing.
+            this.state.exitHoldMs = this.exitHoldMs;
         }
         await this.refreshBalancesAndMetadata();
         // TODO: Persist world balance on dispose
@@ -260,11 +270,13 @@ export class GameRoom extends Room {
         // We interpret message.x/message.y as world-space mouse coordinates.
         const mouseX = Number(message.x) || 0;
         const mouseY = Number(message.y) || 0;
+        const splitPressed = next.space && !prev.space;
+        const ejectPressed = next.w && !prev.w;
         this.engine.setInput(client.sessionId, {
             mouseX,
             mouseY,
-            splitPressed: next.space && !prev.space,
-            ejectPressed: next.w && !prev.w,
+            splitPressed,
+            ejectPressed,
         });
         // Exit-hold overlay (economic) is tracked outside the engine
         if (next.q && !prev.q) {
@@ -293,35 +305,49 @@ export class GameRoom extends Room {
         const sim = this.engine.getPlayer(client.sessionId);
         if (!sim || !sim.alive)
             return;
-        const userData = client.userData;
-        const sessionId = generateSessionId(userData.wallet, ++this.sessionNonce);
-        const totalMass = this.engine.getPlayerTotalMass(client.sessionId);
-        const payoutWei = massToPayoutAmount(totalMass, this.massPerEth);
-        const reserved = await reserveExitLiquidityWei({
-            serverId: config.serverId,
-            sessionId,
-            payoutWei,
-            ttlSeconds: config.exitTicketTtlSeconds,
-        });
-        if (!reserved) {
-            client.send("exitError", { message: "Server temporarily out of funds, please try again." });
-            this.cancelExit(client.sessionId);
-            return;
+        let exitSessionId = null;
+        let reservedOk = false;
+        try {
+            const userData = client.userData;
+            const sessionId = generateSessionId(userData.wallet, ++this.sessionNonce);
+            exitSessionId = sessionId;
+            const totalMass = this.engine.getPlayerTotalMass(client.sessionId);
+            const payoutWei = massToPayoutAmount(totalMass, this.massPerEth);
+            const reserved = await reserveExitLiquidityWei({
+                serverId: config.serverId,
+                sessionId,
+                payoutWei,
+                ttlSeconds: config.exitTicketTtlSeconds,
+            });
+            reservedOk = reserved;
+            if (!reserved) {
+                client.send("exitError", { message: "Server temporarily out of funds, please try again." });
+                this.cancelExit(client.sessionId);
+                return;
+            }
+            const ticket = await createExitTicket(sessionId, userData.wallet, payoutWei);
+            await storeExitTicket(this.presence, ticket);
+            const serializedTicket = {
+                serverId: ticket.serverId,
+                sessionId: ticket.sessionId,
+                player: ticket.player,
+                payout: ticket.payout.toString(),
+                deadline: ticket.deadline.toString(),
+                signature: ticket.signature,
+            };
+            client.send("exitTicket", serializedTicket);
+            console.log(`Player ${client.sessionId} exited with payout ${payoutWei.toString()}`);
+            sim.alive = false;
+            this.removePlayer(client.sessionId);
         }
-        const ticket = await createExitTicket(sessionId, userData.wallet, payoutWei);
-        await storeExitTicket(this.presence, ticket);
-        const serializedTicket = {
-            serverId: ticket.serverId,
-            sessionId: ticket.sessionId,
-            player: ticket.player,
-            payout: ticket.payout.toString(),
-            deadline: ticket.deadline.toString(),
-            signature: ticket.signature,
-        };
-        client.send("exitTicket", serializedTicket);
-        console.log(`Player ${client.sessionId} exited with payout ${payoutWei.toString()}`);
-        sim.alive = false;
-        this.removePlayer(client.sessionId);
+        catch (error) {
+            console.error(`[GameRoom] completeExit failed for ${client.sessionId}:`, error);
+            if (reservedOk && exitSessionId) {
+                void releaseExitReservation(config.serverId, exitSessionId);
+            }
+            client.send("exitError", { message: "Exit failed, please try again." });
+            this.cancelExit(client.sessionId);
+        }
     }
     /**
      * Game loop update (fixed 50ms ticks).

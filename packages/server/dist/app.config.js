@@ -7,9 +7,8 @@ import express from "express";
 import { config as envConfig } from "./config.js";
 import { GameRoom } from "./rooms/GameRoom.js";
 import { verifyPrivyToken, getPrivyUser, getPrimaryWallet } from "./auth/privy.js";
-import { getPlayerDeposits } from "./services/ponder.js";
-import { isDepositUsed } from "./services/depositTracker.js";
-import { startBalanceSync } from "./services/balance.js";
+import { getPlayerDeposits, serverIdToBytes32 } from "./services/ponder.js";
+import { isDepositUsed, startAccountingSync } from "./services/accounting.js";
 // Parse Redis URL into options object so we can disable ready check.
 // Ready check sends INFO command which fails if connection is already in subscriber mode.
 function parseRedisUrl(url) {
@@ -177,9 +176,18 @@ export default config({
                     return;
                 }
                 const normalizedWallet = wallet.toLowerCase();
+                const targetServerIdB32 = serverIdToBytes32(serverId).toLowerCase();
                 // 1. RECONNECT PATH: Check if any active GameRoom already has a living entity for this wallet.
                 try {
-                    const rooms = await matchMaker.query({ name: "game", metadata: { serverId } });
+                    const allRooms = await matchMaker.query({ name: "game" });
+                    const roomsMatchingServer = allRooms.filter((room) => {
+                        const sid = room.metadata?.serverId;
+                        if (typeof sid !== "string" || sid.length === 0)
+                            return false;
+                        return serverIdToBytes32(sid).toLowerCase() === targetServerIdB32;
+                    });
+                    // If metadata filtering is incomplete for any reason, fall back to scanning all rooms.
+                    const rooms = roomsMatchingServer.length > 0 ? roomsMatchingServer : allRooms;
                     for (const room of rooms) {
                         try {
                             const hasEntity = (await matchMaker.remoteRoomCall(room.roomId, "hasActiveEntity", [normalizedWallet]));
@@ -188,6 +196,7 @@ export default config({
                                 res.json({
                                     canJoin: true,
                                     action: "reconnect",
+                                    roomId: room.roomId,
                                     wallet,
                                     serverId,
                                 });
@@ -250,7 +259,7 @@ export default config({
     beforeListen: () => {
         // Start background sync to keep pelletReserveWei (worldAmount) and observed bankroll
         // up-to-date for this serverId, even when deposits occur while no one is in-game.
-        startBalanceSync({ serverId: envConfig.serverId });
+        startAccountingSync({ serverId: envConfig.serverId });
         console.log(`Game server starting on port ${envConfig.port}`);
         console.log(`Server ID: ${envConfig.serverId}`);
         console.log(`Ponder URL: ${envConfig.ponderUrl}`);
