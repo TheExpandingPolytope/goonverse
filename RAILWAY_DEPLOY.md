@@ -40,6 +40,8 @@ You can always override the address with `WORLD_CONTRACT_ADDRESS` if needed.
   - `VITE_GAME_SERVER_URL`
   - `VITE_WS_ENDPOINT`
 
+Note: because this is a Vite static build, `VITE_*` variables must be present **during the Docker build** (not just at runtime).
+
 #### Server (`packages/server`)
 
 - **Root directory**: `packages/server`
