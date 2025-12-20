@@ -1,4 +1,4 @@
-# AgarCash – Game & Protocol Specification  
+# globs.fun – Game & Protocol Specification  
 _Agar.io-style real-money arena with minimal on-chain state_
 
 > **Note (Gameplay Parity):** We are aligning core gameplay mechanics to **Ogar3 FFA**.  
@@ -8,7 +8,7 @@ _Agar.io-style real-money arena with minimal on-chain state_
 
 ## 0. Scope & Design Goals
 
-AgarCash is a **real-time Agar.io-like game** where:
+globs.fun is a **real-time Agar.io-like game** where:
 
 - Players **deposit ETH** to join a round.
 - Deposits are converted into **in-game mass** via a fixed **Mass-Per-Dollar (MPD)** rate (we keep the MPD terminology for economy tuning even though settlement is in ETH).

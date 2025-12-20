@@ -120,7 +120,7 @@ export const Overlay = () => {
     <div className="overlay">
       <div className="overlay__card-container">
         <div className="overlay__card">
-          <h1 className="overlay__title">agarcash.io</h1>
+          <h1 className="overlay__title">globs.fun</h1>
           <p className="overlay__subtitle">Earn real money playing agar.</p>
           <div className="overlay__field">
             <label className="overlay__label" htmlFor="display-name">

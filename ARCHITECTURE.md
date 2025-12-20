@@ -1,4 +1,4 @@
-# AgarCash System Architecture
+# globs.fun System Architecture
 
 ## 1. High-Level Overview
 
@@ -18,7 +18,7 @@ graph TD
     end
     
     subgraph "On-Chain (Base)"
-        Contract[AgarCash Contract]
+        Contract[globs.fun Contract]
     end
     
     subgraph "Infrastructure"

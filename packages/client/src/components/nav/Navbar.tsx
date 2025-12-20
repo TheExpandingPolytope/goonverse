@@ -17,7 +17,7 @@ export const Navbar = () => {
 
   return (
     <nav className="navbar">
-      <div className="navbar__brand">AGARCASH</div>
+      <div className="navbar__brand">globs.fun</div>
       <div className="navbar__status">
         <span>{aggregatePlayers} players live</span>
         <span>
