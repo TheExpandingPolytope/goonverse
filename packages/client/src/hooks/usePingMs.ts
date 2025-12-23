@@ -21,9 +21,6 @@ let inFlightKey: string | null = null
 async function measurePingMs(httpOrigin: string, timeoutMs: number): Promise<number> {
   const key = `${httpOrigin}|${timeoutMs}`
   if (inFlight && inFlightKey === key) {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/28c26f54-5ed2-4189-a8e6-df10466d39de',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'packages/client/src/hooks/usePingMs.ts:measurePingMs',message:'measurePingMs:dedupe',data:{key},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'H2'})}).catch(()=>{});
-    // #endregion agent log
     return inFlight
   }
 
@@ -33,10 +30,6 @@ async function measurePingMs(httpOrigin: string, timeoutMs: number): Promise<num
   const start = performance.now()
   const promise = (async () => {
     try {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/28c26f54-5ed2-4189-a8e6-df10466d39de',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'packages/client/src/hooks/usePingMs.ts:measurePingMs',message:'measurePingMs:start',data:{httpOrigin,timeoutMs},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'H1'})}).catch(()=>{});
-    // #endregion agent log
-
     // /ping exists on the game server; use no-store to avoid proxy caching.
     await fetch(`${httpOrigin}/ping`, {
       method: 'GET',
@@ -49,9 +42,6 @@ async function measurePingMs(httpOrigin: string, timeoutMs: number): Promise<num
 
     const end = performance.now()
     const ms = Math.max(0, Math.round(end - start))
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/28c26f54-5ed2-4189-a8e6-df10466d39de',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'packages/client/src/hooks/usePingMs.ts:measurePingMs',message:'measurePingMs:end',data:{ms},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'H1'})}).catch(()=>{});
-    // #endregion agent log
     return ms
     } finally {
     window.clearTimeout(id)
@@ -91,25 +81,16 @@ export function usePingMs(httpOrigin: string, options?: UsePingMsOptions): PingS
     let cancelled = false
     setIsLoading(true)
     setError(null)
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/28c26f54-5ed2-4189-a8e6-df10466d39de',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'packages/client/src/hooks/usePingMs.ts:useEffect',message:'usePingMs:effect',data:{httpOrigin,timeoutMs,refreshNonce},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'H2'})}).catch(()=>{});
-    // #endregion agent log
 
     void (async () => {
       try {
         const measured = await measurePingMs(httpOrigin, timeoutMs)
         if (cancelled) return
         setPingMs(measured)
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/28c26f54-5ed2-4189-a8e6-df10466d39de',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'packages/client/src/hooks/usePingMs.ts:setPingMs',message:'usePingMs:setPingMs',data:{measured},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'H1'})}).catch(()=>{});
-        // #endregion agent log
       } catch (e) {
         if (cancelled) return
         setError(e instanceof Error ? e.message : 'Ping failed')
         setPingMs(null)
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/28c26f54-5ed2-4189-a8e6-df10466d39de',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'packages/client/src/hooks/usePingMs.ts:catch',message:'usePingMs:error',data:{error:e instanceof Error?e.message:'Ping failed'},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'H1'})}).catch(()=>{});
-        // #endregion agent log
       } finally {
         if (!cancelled) {
           setIsLoading(false)

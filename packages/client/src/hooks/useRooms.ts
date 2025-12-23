@@ -51,9 +51,6 @@ export const useRooms = () => {
   const load = useCallback(async () => {
     setIsLoading(true)
     setError(null)
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/28c26f54-5ed2-4189-a8e6-df10466d39de',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'packages/client/src/hooks/useRooms.ts:load',message:'useRooms:load:start',data:{httpOrigin:env.httpOrigin},timestamp:Date.now(),sessionId:'debug-session',runId:'pre-fix',hypothesisId:'H3'})}).catch(()=>{});
-    // #endregion agent log
     try {
       const fetched = await fetchRooms()
       const next =
@@ -64,16 +61,10 @@ export const useRooms = () => {
               pingMs,
             }))
       setRooms(next)
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/28c26f54-5ed2-4189-a8e6-df10466d39de',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'packages/client/src/hooks/useRooms.ts:load',message:'useRooms:load:success',data:{count:next.length,hasPingMs:next.some(r=>r.pingMs!=null)},timestamp:Date.now(),sessionId:'debug-session',runId:'pre-fix',hypothesisId:'H3'})}).catch(()=>{});
-      // #endregion agent log
     } catch (err) {
       console.error('[useRooms] Failed to fetch rooms', err)
       setError(err instanceof Error ? err.message : 'Failed to fetch rooms')
       setRooms([])
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/28c26f54-5ed2-4189-a8e6-df10466d39de',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'packages/client/src/hooks/useRooms.ts:load',message:'useRooms:load:error',data:{error:err instanceof Error?err.message:'Failed to fetch rooms'},timestamp:Date.now(),sessionId:'debug-session',runId:'pre-fix',hypothesisId:'H3'})}).catch(()=>{});
-      // #endregion agent log
     } finally {
       setIsLoading(false)
     }
@@ -94,9 +85,6 @@ export const useRooms = () => {
         changed = true
         return { ...r, pingMs }
       })
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/28c26f54-5ed2-4189-a8e6-df10466d39de',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'packages/client/src/hooks/useRooms.ts:attachPing',message:'useRooms:attachPing',data:{pingMs,prevCount:prev.length,changed,roomsLengthDep:rooms.length},timestamp:Date.now(),sessionId:'debug-session',runId:'pre-fix',hypothesisId:'H4'})}).catch(()=>{});
-      // #endregion agent log
       return changed ? next : prev
     })
   }, [pingMs, rooms.length])
