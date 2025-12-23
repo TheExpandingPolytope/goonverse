@@ -117,18 +117,23 @@ export const Overlay = () => {
   }
 
   return (
-    <div className="overlay">
-      <div className="overlay__card-container">
-        <div className="overlay__card">
-          <h1 className="overlay__title">globs.fun</h1>
-          <p className="overlay__subtitle">Earn real money playing agar.</p>
-          <div className="overlay__field">
-            <label className="overlay__label" htmlFor="display-name">
-              Display name (optional)
-            </label>
+    <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-4 sm:p-6">
+      <div className="pointer-events-auto w-full max-w-[90%] sm:max-w-[380px]">
+        <div className="card-premium backdrop-blur-2xl rounded-2xl p-6 sm:p-8">
+          <div className="text-center mb-6 sm:mb-8">
+            <h1 className="text-4xl sm:text-5xl font-black tracking-tight mb-3">
+              <span className="gradient-text-white">globs</span>
+              <span className="logo-green-glow">.fun</span>
+            </h1>
+            <p className="text-[13px] sm:text-sm text-gray-500 leading-relaxed max-w-[300px] mx-auto font-medium">
+              Real money agar.io — Eat smaller globs, grow bigger, winner takes the pot
+            </p>
+          </div>
+
+          <div className="mb-4">
             <input
               id="display-name"
-              className="overlay__input"
+              type="text"
               value={customDisplayName}
               onChange={(e) => {
                 const next = e.target.value
@@ -140,60 +145,64 @@ export const Overlay = () => {
                   // ignore
                 }
               }}
-              placeholder={primaryHandle ?? 'Your name'}
+              placeholder={primaryHandle ?? 'Display Name'}
               disabled={!isAuthenticated}
               maxLength={24}
               autoComplete="nickname"
+              className="w-full px-4 py-3.5 rounded-xl input-premium text-[15px] text-white placeholder:text-gray-600 font-medium focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed"
             />
           </div>
+
           <PlayButton servers={rooms} displayName={effectiveDisplayName || null} />
 
           {(exitError || exitTicket) && (
-            <div className="overlay__field" style={{ marginTop: 16 }}>
-              <label className="overlay__label">Exit ticket (testing)</label>
-              {exitError ? <div className="overlay__subtitle">Exit error: {exitError}</div> : null}
+            <div className="mt-6 rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+              <div className="text-xs font-semibold text-gray-500 mb-2">Exit ticket (testing)</div>
+              {exitError ? <div className="text-xs text-red-400 mb-2">Exit error: {exitError}</div> : null}
               {exitTicket ? (
                 <textarea
-                  className="overlay__input"
+                  className="w-full px-3 py-3 rounded-xl input-premium text-xs font-mono text-gray-400 focus:outline-none"
                   value={JSON.stringify(exitTicket, null, 2)}
                   readOnly
                   rows={6}
                 />
               ) : null}
-              {exitClaimError ? <div className="overlay__subtitle">Claim error: {exitClaimError}</div> : null}
+              {exitClaimError ? <div className="text-xs text-red-400 mt-2">Claim error: {exitClaimError}</div> : null}
               {exitClaimTxHash ? (
-                <div className="overlay__subtitle">Claim tx: {exitClaimTxHash.slice(0, 10)}…</div>
+                <div className="text-xs text-gray-500 mt-2">Claim tx: {exitClaimTxHash.slice(0, 10)}…</div>
               ) : null}
-              {exitTicket ? (
+              <div className="flex items-center gap-2 mt-3">
+                {exitTicket ? (
+                  <button
+                    className="px-3 py-2 rounded-lg btn-secondary text-gray-300 text-xs font-semibold disabled:opacity-60 disabled:cursor-not-allowed"
+                    type="button"
+                    onClick={() => {
+                      void claimExitTicket()
+                    }}
+                    disabled={exitClaimState === 'confirming' || exitClaimState === 'pending'}
+                  >
+                    {exitClaimState === 'confirming'
+                      ? 'Confirming...'
+                      : exitClaimState === 'pending'
+                        ? 'Claiming...'
+                        : exitClaimState === 'success'
+                          ? 'Claimed'
+                          : 'Claim exit'}
+                  </button>
+                ) : null}
                 <button
-                  className="overlay__button"
+                  className="px-3 py-2 rounded-lg btn-secondary text-gray-300 text-xs font-semibold"
                   type="button"
                   onClick={() => {
-                    void claimExitTicket()
+                    setExitClaimState('idle')
+                    setExitClaimError(null)
+                    setExitClaimTxHash(null)
+                    clearExit()
                   }}
-                  disabled={exitClaimState === 'confirming' || exitClaimState === 'pending'}
                 >
-                  {exitClaimState === 'confirming'
-                    ? 'Confirming...'
-                    : exitClaimState === 'pending'
-                      ? 'Claiming...'
-                      : exitClaimState === 'success'
-                        ? 'Claimed'
-                        : 'Claim exit'}
+                  Clear
                 </button>
-              ) : null}
-              <button
-                className="overlay__button"
-                type="button"
-                onClick={() => {
-                  setExitClaimState('idle')
-                  setExitClaimError(null)
-                  setExitClaimTxHash(null)
-                  clearExit()
-                }}
-              >
-                Clear
-              </button>
+              </div>
             </div>
           )}
         </div>

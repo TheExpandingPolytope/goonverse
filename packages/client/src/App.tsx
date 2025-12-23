@@ -4,7 +4,7 @@ import { World } from './world/World'
 
 function App() {
   return (
-    <div className="app-shell">
+    <div className="relative min-h-screen overflow-hidden">
       <World />
       <Navbar />
       <Overlay />

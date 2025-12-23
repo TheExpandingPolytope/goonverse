@@ -192,12 +192,13 @@ function movePoints(opts: {
 }
 
 function drawGrid(ctx: CanvasRenderingContext2D, width: number, height: number, camX: number, camY: number, zoom: number) {
-  ctx.fillStyle = '#F2FBFF'
+  // Dark-mode default (always-on): match the app's deep dark background.
+  ctx.fillStyle = '#05050a'
   ctx.fillRect(0, 0, width, height)
 
   ctx.save()
-  ctx.strokeStyle = '#000000'
-  ctx.globalAlpha = 0.2
+  ctx.strokeStyle = '#ffffff'
+  ctx.globalAlpha = 0.06
   ctx.scale(zoom, zoom)
 
   const w = width / zoom
@@ -222,10 +223,32 @@ function drawGrid(ctx: CanvasRenderingContext2D, width: number, height: number, 
   ctx.restore()
 }
 
-export const bootstrapRenderer = (canvas: HTMLCanvasElement, getViewModel: () => WorldViewModel | null) => {
+export type RendererOptions = {
+  /**
+   * If provided, render will be throttled to at most this FPS.
+   * Prefer `getMaxFps` when the cap needs to change dynamically.
+   */
+  maxFps?: number
+  /**
+   * Dynamic FPS cap. Return a number to cap, or null/undefined for uncapped.
+   * Called from the render loop.
+   */
+  getMaxFps?: () => number | null | undefined
+  /**
+   * If true, the renderer will reduce work while the tab is hidden.
+   */
+  pauseWhenHidden?: boolean
+}
+
+export const bootstrapRenderer = (
+  canvas: HTMLCanvasElement,
+  getViewModel: () => WorldViewModel | null,
+  options?: RendererOptions,
+) => {
   const ctx = canvas.getContext('2d')
 
   let animationFrameId: number | null = null
+  let timeoutId: number | null = null
 
   // Render caches / state
   const jellyById = new Map<string, JellyState>()
@@ -274,6 +297,23 @@ export const bootstrapRenderer = (canvas: HTMLCanvasElement, getViewModel: () =>
   // Adaptive jelly quality (Ogar-style)
   let quality = 1
   let lastFrameAt = performance.now()
+  let lastDrawAt = lastFrameAt
+
+  const scheduleNext = (delayMs: number = 0) => {
+    if (timeoutId) {
+      window.clearTimeout(timeoutId)
+      timeoutId = null
+    }
+
+    if (delayMs > 0) {
+      timeoutId = window.setTimeout(() => {
+        animationFrameId = requestAnimationFrame(render)
+      }, delayMs)
+      return
+    }
+
+    animationFrameId = requestAnimationFrame(render)
+  }
 
   const render = () => {
     if (!ctx) return
@@ -283,10 +323,30 @@ export const bootstrapRenderer = (canvas: HTMLCanvasElement, getViewModel: () =>
     const { width, height } = canvas
     const view = getViewModel()
 
+    // Low-power mode while the page is hidden (background tab).
+    if (options?.pauseWhenHidden && typeof document !== 'undefined' && document.hidden) {
+      drawGrid(ctx, width, height, 0, 0, 1)
+      scheduleNext(250)
+      return
+    }
+
+    // FPS cap (used for low-power "mock mode" behind overlay).
+    const fpsCap = options?.getMaxFps?.() ?? options?.maxFps
+    if (typeof fpsCap === 'number' && fpsCap > 0) {
+      const now = performance.now()
+      const interval = 1000 / fpsCap
+      const dtSinceDraw = now - lastDrawAt
+      if (dtSinceDraw < interval) {
+        scheduleNext(interval - dtSinceDraw)
+        return
+      }
+      lastDrawAt = now
+    }
+
     if (!view) {
       // Basic empty-state: light background + grid.
       drawGrid(ctx, width, height, 0, 0, 1)
-      animationFrameId = requestAnimationFrame(render)
+      scheduleNext()
       return
     }
 
@@ -609,7 +669,7 @@ export const bootstrapRenderer = (canvas: HTMLCanvasElement, getViewModel: () =>
       }
     }
 
-    animationFrameId = requestAnimationFrame(render)
+    scheduleNext()
   }
 
   const handleResize = () => {
@@ -623,6 +683,7 @@ export const bootstrapRenderer = (canvas: HTMLCanvasElement, getViewModel: () =>
 
   return () => {
     if (animationFrameId) cancelAnimationFrame(animationFrameId)
+    if (timeoutId) window.clearTimeout(timeoutId)
     window.removeEventListener('resize', handleResize)
   }
 }

@@ -70,7 +70,7 @@ export default buildModule("World", (m) => {
 
   // Fund test wallet with ETH for local development
   if (hre.network.name === "localhost" || hre.network.name === "hardhat") {
-    m.send("FundTestWallet", "0x40521D8831cf2df0BF3550b762dbAc89786BE6E3", 100n * 10n ** 18n);
+    m.send("FundTestWallet", "0x40521D8831cf2df0BF3550b762dbAc89786BE6E3", 1n * 10n ** 18n);
   }
 
   return { world };
