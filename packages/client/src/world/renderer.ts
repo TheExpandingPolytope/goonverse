@@ -12,15 +12,20 @@ class UText {
   private _strokeColor = '#000000'
   private _size = 16
   private _scale = 1
+  private _glow = false
+  private _glowColor = '#00FF88'
+  private _glowBlur = 4
   private _dirty = true
   private _canvas: HTMLCanvasElement | null = null
   private _ctx: CanvasRenderingContext2D | null = null
 
-  constructor(size?: number, color?: string, stroke?: boolean, strokeColor?: string) {
+  constructor(size?: number, color?: string, stroke?: boolean, strokeColor?: string, glow?: boolean, glowColor?: string) {
     if (typeof size === 'number') this._size = size
     if (typeof color === 'string') this._color = color
     if (typeof stroke === 'boolean') this._stroke = stroke
     if (typeof strokeColor === 'string') this._strokeColor = strokeColor
+    if (typeof glow === 'boolean') this._glow = glow
+    if (typeof glowColor === 'string') this._glowColor = glowColor
   }
 
   setSize(size: number) {
@@ -44,6 +49,15 @@ class UText {
     }
   }
 
+  setGlow(glow: boolean, glowColor?: string, glowBlur?: number) {
+    if (this._glow !== glow || (glowColor && this._glowColor !== glowColor) || (glowBlur && this._glowBlur !== glowBlur)) {
+      this._glow = glow
+      if (glowColor) this._glowColor = glowColor
+      if (glowBlur) this._glowBlur = glowBlur
+      this._dirty = true
+    }
+  }
+
   render(): HTMLCanvasElement {
     if (!this._canvas) {
       this._canvas = document.createElement('canvas')
@@ -59,16 +73,19 @@ class UText {
       const value = this._value
       const scale = this._scale
       const fontsize = this._size
-      const font = `${fontsize}px Ubuntu`
+      const font = `600 ${fontsize}px Rubik`
 
       ctx.font = font
 
       const h = Math.trunc(0.2 * fontsize)
       const wd = fontsize * 0.1
       const h2 = h * 0.5
+      
+      // Extra padding for glow effect
+      const glowPad = this._glow ? this._glowBlur * 2 : 0
 
-      canvas.width = ctx.measureText(value).width * scale + 3
-      canvas.height = (fontsize + h) * scale
+      canvas.width = ctx.measureText(value).width * scale + 3 + glowPad * 2
+      canvas.height = (fontsize + h) * scale + glowPad * 2
 
       // Setting canvas size resets the state.
       ctx.font = font
@@ -78,7 +95,17 @@ class UText {
       ctx.fillStyle = this._color
 
       ctx.setTransform(1, 0, 0, 1, 0, 0)
+      ctx.translate(glowPad, glowPad)
       ctx.scale(scale, scale)
+      
+      // Apply subtle glow effect
+      if (this._glow) {
+        ctx.shadowColor = this._glowColor
+        ctx.shadowBlur = this._glowBlur
+        ctx.shadowOffsetX = 0
+        ctx.shadowOffsetY = 0
+      }
+      
       if (this._stroke) ctx.strokeText(value, 0, fontsize - h2)
       ctx.fillText(value, 0, fontsize - h2)
     }
@@ -254,7 +281,10 @@ export const bootstrapRenderer = (
   const jellyById = new Map<string, JellyState>()
   const blobTextById = new Map<string, { name: UText; usd: UText }>()
   const pelletLabelByValue = new Map<string, UText>()
-  const bottomWorthText = new UText(28, '#FFFFFF', true, '#000000')
+  // Green money colors
+  const MONEY_COLOR = '#00FF88'
+  const MONEY_STROKE = '#003322'
+  const bottomWorthText = new UText(32, MONEY_COLOR, true, MONEY_STROKE)
 
   // Simple skin support (optional; expects /skinList.txt and /skins/<name>.png)
   let knownSkins: Set<string> | null = null
@@ -444,17 +474,22 @@ export const bootstrapRenderer = (
       if (r <= 0) continue
 
       if (node.kind === 'food') {
+        // Cartoony pellet with outline
         ctx.beginPath()
         ctx.arc(x, y, r, 0, Math.PI * 2)
         ctx.fillStyle = node.color
         ctx.fill()
+        // Dark outline
+        ctx.strokeStyle = 'rgba(0,0,0,0.4)'
+        ctx.lineWidth = Math.max(1, r * 0.15)
+        ctx.stroke()
 
         // USD label above pellet
         const label = formatUsd(node.usdValue, true)
         if (r >= 4) {
           let text = pelletLabelByValue.get(label)
           if (!text) {
-            text = new UText(14, '#FFFFFF', true, '#000000')
+            text = new UText(14, MONEY_COLOR, true, MONEY_STROKE)
             text.setValue(label)
             pelletLabelByValue.set(label, text)
           }
@@ -462,16 +497,21 @@ export const bootstrapRenderer = (
           const c = text.render()
           const w = Math.trunc(c.width * invRatio)
           const h = Math.trunc(c.height * invRatio)
-          ctx.drawImage(c, x - Math.trunc(w / 2), y - r - 10, w, h)
+          ctx.drawImage(c, x - Math.trunc(w / 2), y - r - h - 4, w, h)
         }
         continue
       }
 
       if (node.kind === 'ejected') {
+        // Cartoony ejected mass with outline
         ctx.beginPath()
         ctx.arc(x, y, r, 0, Math.PI * 2)
         ctx.fillStyle = node.color
         ctx.fill()
+        // Dark outline
+        ctx.strokeStyle = 'rgba(0,0,0,0.4)'
+        ctx.lineWidth = Math.max(1, r * 0.12)
+        ctx.stroke()
         continue
       }
 
@@ -503,6 +543,10 @@ export const bootstrapRenderer = (
         ctx.arc(x, y, r, 0, 2 * Math.PI, false)
         ctx.closePath()
         ctx.fill()
+        // Cartoony outline
+        ctx.strokeStyle = 'rgba(0,0,0,0.35)'
+        ctx.lineWidth = Math.max(2, r * 0.04)
+        ctx.stroke()
       } else {
         movePoints({
           state,
@@ -531,11 +575,10 @@ export const bootstrapRenderer = (
 
         ctx.fill()
 
-        // Subtle outline
-        ctx.globalAlpha *= 0.1
-        ctx.strokeStyle = '#000000'
+        // Cartoony dark outline
+        ctx.strokeStyle = 'rgba(0,0,0,0.35)'
+        ctx.lineWidth = Math.max(2, r * 0.04)
         ctx.stroke()
-        ctx.globalAlpha = 1
       }
 
       // Skin rendering for player cells only
@@ -553,7 +596,7 @@ export const bootstrapRenderer = (
         const nameSize = Math.max(Math.trunc(0.3 * r), 24)
         const cached = blobTextById.get(node.id) ?? {
           name: new UText(nameSize, '#FFFFFF', true, '#000000'),
-          usd: new UText(nameSize * 0.5, '#FFFFFF', true, '#000000'),
+          usd: new UText(nameSize * 0.5, MONEY_COLOR, true, MONEY_STROKE),
         }
         blobTextById.set(node.id, cached)
 
@@ -584,11 +627,20 @@ export const bootstrapRenderer = (
         // Exit ring (economic overlay)
         if (node.isLocal && view.hud.exitHoldProgress > 0) {
           const progress = clamp(view.hud.exitHoldProgress, 0, 1)
-          ctx.beginPath()
-          ctx.strokeStyle = 'rgba(0,0,0,0.85)'
+          ctx.save()
+          // Background track
+          ctx.strokeStyle = 'rgba(0,0,0,0.5)'
           ctx.lineWidth = 4 / zoom
-          ctx.arc(x, y, r + 10, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * progress)
+          ctx.beginPath()
+          ctx.arc(x, y, r + 12, 0, Math.PI * 2)
           ctx.stroke()
+          // Progress arc
+          ctx.strokeStyle = MONEY_COLOR
+          ctx.lineWidth = 4 / zoom
+          ctx.beginPath()
+          ctx.arc(x, y, r + 12, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * progress)
+          ctx.stroke()
+          ctx.restore()
         }
       }
 
@@ -603,19 +655,25 @@ export const bootstrapRenderer = (
       const exitText = view.hud.exitHoldProgress > 0 ? `Exit: ${(view.hud.exitHoldProgress * 100).toFixed(0)}%` : null
 
       ctx.save()
-      ctx.globalAlpha = 0.2
-      ctx.fillStyle = '#000000'
-      ctx.fillRect(10, 10, 220, exitText ? 58 : 34)
+      // Frosted glass panel effect
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.45)'
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)'
+      ctx.lineWidth = 1
+      ctx.beginPath()
+      ctx.roundRect(10, 10, 200, exitText ? 58 : 34, 8)
+      ctx.fill()
+      ctx.stroke()
       ctx.restore()
 
       ctx.fillStyle = '#FFFFFF'
       ctx.textAlign = 'left'
       ctx.textBaseline = 'top'
-      ctx.font = '18px Ubuntu'
-      ctx.fillText(scoreText, 16, 16)
+      ctx.font = '600 18px Rubik'
+      ctx.fillText(scoreText, 18, 16)
       if (exitText) {
-        ctx.font = '16px Ubuntu'
-        ctx.fillText(exitText, 16, 38)
+        ctx.fillStyle = MONEY_COLOR
+        ctx.font = '500 16px Rubik'
+        ctx.fillText(exitText, 18, 38)
       }
     }
 
@@ -630,42 +688,62 @@ export const bootstrapRenderer = (
       ctx.drawImage(c, width / 2 - w / 2, height - 56, w, h)
     }
 
-    // Leaderboard (top-right) — keep our existing panel
+    // Leaderboard (top-right) — polished glass panel
     if (view.hud.showLeaderboard !== false) {
       const entries = view.hud.leaderboard
       const maxRows = Math.min(entries.length, 12)
       const minRows = 10
-      const panelW = 240
+      const panelW = 260
       const panelX = width - panelW - 18
       const panelY = 72
-      const rowH = 18
+      const rowH = 22
       const rowsForPanel = Math.max(maxRows, minRows)
-      const panelH = 28 + rowsForPanel * rowH + 12
+      const panelH = 36 + rowsForPanel * rowH + 16
 
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.35)'
-      ctx.strokeStyle = 'rgba(255,255,255,0.10)'
+      // Panel background with gradient border
+      ctx.save()
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.55)'
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)'
       ctx.lineWidth = 1
       ctx.beginPath()
-      ctx.roundRect(panelX, panelY, panelW, panelH, 14)
+      ctx.roundRect(panelX, panelY, panelW, panelH, 12)
       ctx.fill()
       ctx.stroke()
+      ctx.restore()
 
+      // Title
       ctx.textAlign = 'left'
       ctx.textBaseline = 'top'
-      ctx.font = '12px Ubuntu'
+      ctx.font = '700 14px Rubik'
       ctx.fillStyle = '#FFFFFF'
-      ctx.fillText('Leaderboard', panelX + 12, panelY + 10)
+      ctx.fillText('Leaderboard', panelX + 14, panelY + 12)
 
       for (let i = 0; i < maxRows; i++) {
         const e = entries[i]
-        const yRow = panelY + 28 + i * rowH
-        ctx.fillStyle = e.isLocal ? 'rgba(255,170,170,0.95)' : 'rgba(255,255,255,0.9)'
-        ctx.font = '12px Ubuntu'
-        const name = e.displayName.length > 16 ? `${e.displayName.slice(0, 15)}…` : e.displayName
-        ctx.fillText(`${i + 1}. ${name}`, panelX + 12, yRow)
-        ctx.textAlign = 'right'
-        ctx.fillText(formatUsd(e.usdValue, true), panelX + panelW - 12, yRow)
+        const yRow = panelY + 36 + i * rowH
+        
+        // Highlight local player row
+        if (e.isLocal) {
+          ctx.save()
+          ctx.fillStyle = 'rgba(0, 255, 136, 0.12)'
+          ctx.beginPath()
+          ctx.roundRect(panelX + 6, yRow - 2, panelW - 12, rowH, 4)
+          ctx.fill()
+          ctx.restore()
+        }
+        
+        // Rank and name
+        ctx.font = e.isLocal ? '600 13px Rubik' : '400 13px Rubik'
+        ctx.fillStyle = e.isLocal ? MONEY_COLOR : 'rgba(255,255,255,0.9)'
         ctx.textAlign = 'left'
+        const name = e.displayName.length > 14 ? `${e.displayName.slice(0, 13)}…` : e.displayName
+        ctx.fillText(`${i + 1}. ${name}`, panelX + 14, yRow)
+        
+        // USD value in green
+        ctx.textAlign = 'right'
+        ctx.fillStyle = MONEY_COLOR
+        ctx.font = e.isLocal ? '600 13px Rubik' : '500 13px Rubik'
+        ctx.fillText(formatUsd(e.usdValue, true), panelX + panelW - 14, yRow)
       }
     }
 

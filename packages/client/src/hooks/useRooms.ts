@@ -2,7 +2,6 @@ import { useEffect, useState, useCallback } from 'react'
 import { formatUnits } from 'viem'
 import type { RoomSummary } from '@/types/rooms'
 import { env } from '@/lib/env'
-import { usePingMs } from '@/hooks/usePingMs'
 
 type RawRoom = {
   roomId: string
@@ -46,20 +45,12 @@ export const useRooms = () => {
   const [rooms, setRooms] = useState<RoomSummary[]>([])
   const [isLoading, setIsLoading] = useState<boolean>(false)
   const [error, setError] = useState<string | null>(null)
-  const { pingMs } = usePingMs(env.httpOrigin)
 
   const load = useCallback(async () => {
     setIsLoading(true)
     setError(null)
     try {
-      const fetched = await fetchRooms()
-      const next =
-        pingMs == null
-          ? fetched
-          : fetched.map((r) => ({
-              ...r,
-              pingMs,
-            }))
+      const next = await fetchRooms()
       setRooms(next)
     } catch (err) {
       console.error('[useRooms] Failed to fetch rooms', err)
@@ -68,26 +59,11 @@ export const useRooms = () => {
     } finally {
       setIsLoading(false)
     }
-  }, [pingMs])
+  }, [])
 
   useEffect(() => {
     void load()
   }, [load])
-
-  // Attach ping to rooms once it becomes available AND whenever room list changes.
-  // This avoids a race where ping resolves (or is cached) before /rooms finishes loading.
-  useEffect(() => {
-    if (pingMs == null) return
-    setRooms((prev) => {
-      let changed = false
-      const next = prev.map((r) => {
-        if (r.pingMs != null) return r
-        changed = true
-        return { ...r, pingMs }
-      })
-      return changed ? next : prev
-    })
-  }, [pingMs, rooms.length])
 
   return {
     rooms,
