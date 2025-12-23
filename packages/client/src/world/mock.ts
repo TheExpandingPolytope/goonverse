@@ -152,6 +152,9 @@ export function createMockViewModelSource(): () => WorldViewModel {
         payoutEstimate: 0,
         exitHoldProgress: 0,
         localUsdWorth: 25.5,
+        showTopLeftStats: false,
+        showBottomWorth: false,
+        showLeaderboard: false,
         leaderboard,
       },
     }

@@ -3,7 +3,8 @@ import { GameState } from "./schema/GameState.js";
 import { verifyPrivyToken, getPrivyUser, getPrimaryWallet } from "../auth/privy.js";
 import { verifyDeposit, getServer, serverIdToBytes32 } from "../services/ponder.js";
 import { createExitTicket, generateSessionId, massToPayoutAmount, storeExitTicket, payoutAmountToMass, } from "../services/exitController.js";
-import { applyDepositToBalances, creditPelletReserveWei, getPelletReserveWei, releaseExitReservation, reserveExitLiquidityWei, trySpendPelletReserveWei, tryUseDeposit, } from "../services/accounting.js";
+import { tryUseDeposit } from "../services/depositTracker.js";
+import { applyDepositToBalances, creditPelletReserveWei, getPelletReserveWei, releaseExitReservation, reserveExitLiquidityWei, trySpendPelletReserveWei, } from "../services/balance.js";
 import { config } from "../config.js";
 // FFA parity simulation engine
 import { FFA_CONFIG } from "./sim/config.js";

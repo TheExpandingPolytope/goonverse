@@ -67,7 +67,9 @@ export default config({
     // Lightweight ping endpoint for client RTT measurement
     // Returns minimal payload for accurate latency timing
     app.get("/ping", (_req, res) => {
+      // Ensure intermediaries don't cache (we time RTT).
       res.json({ ts: Date.now() });
+      console.log("Ping response:", { ts: Date.now() });
     });
 
     // Room listing endpoint - returns ALL rooms across ALL machines

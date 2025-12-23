@@ -8,7 +8,8 @@ import { config as envConfig } from "./config.js";
 import { GameRoom } from "./rooms/GameRoom.js";
 import { verifyPrivyToken, getPrivyUser, getPrimaryWallet } from "./auth/privy.js";
 import { getPlayerDeposits, serverIdToBytes32 } from "./services/ponder.js";
-import { isDepositUsed, startAccountingSync } from "./services/accounting.js";
+import { isDepositUsed } from "./services/depositTracker.js";
+import { startBalanceSync } from "./services/balance.js";
 // Parse Redis URL into options object so we can disable ready check.
 // Ready check sends INFO command which fails if connection is already in subscriber mode.
 function parseRedisUrl(url) {
@@ -58,6 +59,8 @@ export default config({
         // Lightweight ping endpoint for client RTT measurement
         // Returns minimal payload for accurate latency timing
         app.get("/ping", (_req, res) => {
+            // Ensure intermediaries don't cache (we time RTT).
+            res.setHeader("Cache-Control", "no-store");
             res.json({ ts: Date.now() });
         });
         // Room listing endpoint - returns ALL rooms across ALL machines
@@ -259,7 +262,7 @@ export default config({
     beforeListen: () => {
         // Start background sync to keep pelletReserveWei (worldAmount) and observed bankroll
         // up-to-date for this serverId, even when deposits occur while no one is in-game.
-        startAccountingSync({ serverId: envConfig.serverId });
+        startBalanceSync({ serverId: envConfig.serverId });
         console.log(`Game server starting on port ${envConfig.port}`);
         console.log(`Server ID: ${envConfig.serverId}`);
         console.log(`Ponder URL: ${envConfig.ponderUrl}`);

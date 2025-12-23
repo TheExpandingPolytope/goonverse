@@ -13,7 +13,7 @@ import { WorldAbi } from '@/lib/contracts/WorldAbi'
 export const Overlay = () => {
   const { rooms } = useRooms()
   const { isOverlayVisible, showOverlay } = useUI()
-  const { isAuthenticated, primaryHandle, userId } = useAuth()
+  const { primaryHandle, userId } = useAuth()
   const { phase, exitTicket, exitError, clearExit } = useGameClientContext()
   const { activeAddress, refreshBalance } = useWallet()
   const { writeContractAsync } = useWriteContract()
@@ -122,7 +122,7 @@ export const Overlay = () => {
         <div className="card-premium backdrop-blur-2xl rounded-2xl p-6 sm:p-8">
           <div className="text-center mb-6 sm:mb-8">
             <h1 className="text-4xl sm:text-5xl font-black tracking-tight mb-3">
-              <span className="gradient-text-white">globs</span>
+              <span className="gradient-text-white">Globs</span>
               <span className="logo-green-glow">.fun</span>
             </h1>
             <p className="text-[13px] sm:text-sm text-gray-500 leading-relaxed max-w-[300px] mx-auto font-medium">
@@ -145,11 +145,10 @@ export const Overlay = () => {
                   // ignore
                 }
               }}
-              placeholder={primaryHandle ?? 'Display Name'}
-              disabled={!isAuthenticated}
+              placeholder="Display Name"
               maxLength={24}
               autoComplete="nickname"
-              className="w-full px-4 py-3.5 rounded-xl input-premium text-[15px] text-white placeholder:text-gray-600 font-medium focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed"
+              className="w-full px-4 py-3.5 rounded-xl input-premium text-[15px] text-white placeholder:text-gray-600 font-medium focus:outline-none"
             />
           </div>
 

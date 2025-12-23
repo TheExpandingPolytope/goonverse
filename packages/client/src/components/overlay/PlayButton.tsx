@@ -284,12 +284,10 @@ export const PlayButton = ({ servers, displayName }: PlayButtonProps) => {
             ) : null}
           </div>
           <div className="flex items-center gap-2.5">
-            {selectedServer?.pingMs != null ? (
-              <span className="text-xs text-gray-600 flex items-center gap-1">
-                <Wifi className="w-3 h-3" />
-                {Math.round(selectedServer.pingMs)}ms
-              </span>
-            ) : null}
+            <span className="text-xs text-gray-600 flex items-center gap-1">
+              <Wifi className="w-3 h-3" />
+              {selectedServer?.pingMs != null ? `${Math.round(selectedServer.pingMs)}ms` : '--'}
+            </span>
             <ChevronDown className="w-4 h-4 text-gray-500" />
           </div>
         </button>
@@ -318,12 +316,10 @@ export const PlayButton = ({ servers, displayName }: PlayButtonProps) => {
                       </div>
                       <div className="flex items-center gap-3">
                         <span className="font-bold text-[#4ade80]">{formatUsd(ethToUsd(server.buyInEth, ethUsd), true)}</span>
-                        {server.pingMs != null ? (
-                          <span className="text-xs text-gray-600 flex items-center gap-1">
-                            <Wifi className="w-3 h-3" />
-                            {Math.round(server.pingMs)}ms
-                          </span>
-                        ) : null}
+                        <span className="text-xs text-gray-600 flex items-center gap-1">
+                          <Wifi className="w-3 h-3" />
+                          {server.pingMs != null ? `${Math.round(server.pingMs)}ms` : '--'}
+                        </span>
                       </div>
                     </div>
                   </button>

@@ -29,7 +29,8 @@ export function formatEth(eth: number | null | undefined): string {
 }
 
 export function ethToUsd(eth: number, ethUsd: number | null): number {
-  if (!Number.isFinite(eth) || ethUsd == null || !Number.isFinite(ethUsd)) return 0
+  // If we don't have a price feed, return NaN so formatters display "—" rather than "$0".
+  if (!Number.isFinite(eth) || ethUsd == null || !Number.isFinite(ethUsd)) return Number.NaN
   return eth * ethUsd
 }
 

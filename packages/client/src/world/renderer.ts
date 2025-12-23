@@ -598,7 +598,7 @@ export const bootstrapRenderer = (
     ctx.restore()
 
     // HUD (screen-space)
-    {
+    if (view.hud.showTopLeftStats !== false) {
       const scoreText = `Mass: ${Math.floor(view.hud.currentMass)}`
       const exitText = view.hud.exitHoldProgress > 0 ? `Exit: ${(view.hud.exitHoldProgress * 100).toFixed(0)}%` : null
 
@@ -620,7 +620,7 @@ export const bootstrapRenderer = (
     }
 
     // Bottom-center local worth
-    {
+    if (view.hud.showBottomWorth !== false) {
       const text = formatUsd(view.hud.localUsdWorth, true)
       bottomWorthText.setValue(text)
       bottomWorthText.setScale(1)
@@ -631,7 +631,7 @@ export const bootstrapRenderer = (
     }
 
     // Leaderboard (top-right) — keep our existing panel
-    {
+    if (view.hud.showLeaderboard !== false) {
       const entries = view.hud.leaderboard
       const maxRows = Math.min(entries.length, 12)
       const minRows = 10

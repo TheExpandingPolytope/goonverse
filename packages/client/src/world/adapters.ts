@@ -86,6 +86,12 @@ export type WorldViewModel = {
     pingMs?: number
     serverLabel?: string
     localUsdWorth: number
+    /** Optional: allow hiding certain HUD widgets (useful for mock/demo backgrounds). */
+    showTopLeftStats?: boolean
+    /** Optional: allow hiding certain HUD widgets (useful for mock/demo backgrounds). */
+    showBottomWorth?: boolean
+    /** Optional: allow hiding leaderboard panel (useful for mock/demo backgrounds). */
+    showLeaderboard?: boolean
     leaderboard: Array<{
       sessionId: string
       displayName: string
