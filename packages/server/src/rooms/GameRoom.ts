@@ -5,7 +5,7 @@ import {
   type SpawnOptions 
 } from "./schema/GameState.js";
 import { verifyPrivyToken, getPrivyUser, getPrimaryWallet, type PrivyClaims } from "../auth/privy.js";
-import { verifyDeposit, getServer, serverIdToBytes32 } from "../services/ponder.js";
+import { getServer, serverIdToBytes32 } from "../services/ponder.js";
 import {
   createExitTicket,
   generateSessionId,
@@ -13,15 +13,7 @@ import {
   storeExitTicket,
   payoutAmountToMass,
 } from "../services/exitController.js";
-import { tryUseDeposit } from "../services/depositTracker.js";
-import {
-  applyDepositToBalances,
-  creditPelletReserveWei,
-  getPelletReserveWei,
-  releaseExitReservation,
-  reserveExitLiquidityWei,
-  trySpendPelletReserveWei,
-} from "../services/balance.js";
+import { getAccounts } from "../services/accounts.js";
 import { config } from "../config.js";
 import type { PlayerUserData, AuthContext, SerializedExitTicket } from "../types.js";
 
@@ -50,6 +42,8 @@ export class GameRoom extends Room<GameState> {
   private massPerEth: number = 100;
   private sessionNonce: number = 0;
   private buyInAmount: string = "0";
+  private rakeShareBps: number = 0;
+  private worldShareBps: number = 0;
   private startedAt: number = Date.now();
 
   // Authoritative simulation (FFA parity)
@@ -67,6 +61,7 @@ export class GameRoom extends Room<GameState> {
 
   // Cached balances for metadata
   private cachedPelletReserveWei: bigint = 0n;
+  private spawnCostWei: bigint = 0n;
 
   private sanitizeDisplayName(input: unknown): string | null {
     if (typeof input !== "string") return null;
@@ -130,8 +125,20 @@ export class GameRoom extends Room<GameState> {
       this.exitHoldMs = serverConfig.exitHoldMs;
       this.massPerEth = serverConfig.massPerEth;
       this.buyInAmount = serverConfig.buyInAmount;
+      this.rakeShareBps = serverConfig.rakeShareBps ?? 0;
+      this.worldShareBps = serverConfig.worldShareBps ?? 0;
       this.state.exitHoldMs = serverConfig.exitHoldMs;
       this.state.massPerEth = serverConfig.massPerEth;
+    }
+
+    // Precompute spawn cost in wei (net after rake/world shares). This must match indexer deposit credits.
+    try {
+      const buyInWei = BigInt(this.buyInAmount ?? "0");
+      const rakeBps = BigInt(this.rakeShareBps ?? 0);
+      const worldBps = BigInt(this.worldShareBps ?? 0);
+      this.spawnCostWei = buyInWei - (buyInWei * rakeBps) / 10_000n - (buyInWei * worldBps) / 10_000n;
+    } catch {
+      this.spawnCostWei = 0n;
     }
 
     // TEMP (testing): make exiting faster in dev.
@@ -201,7 +208,7 @@ export class GameRoom extends Room<GameState> {
 
       client.userData = {
         wallet,
-        depositId: existing.depositId ?? (options.depositId as `0x${string}`),
+        depositId: existing.depositId ?? (options.depositId as `0x${string}` | undefined),
         spawnMass: 0n,
         privyClaims: auth.privyClaims,
       } as PlayerUserData;
@@ -210,35 +217,24 @@ export class GameRoom extends Room<GameState> {
       return;
     }
 
-    // SPAWN FLOW: Need a valid, unused deposit
-    if (!options.depositId) {
-      throw new Error("Missing required spawn options: depositId");
+    // SPAWN FLOW: consume hot-ledger balance (user -> world pool)
+    const accounts = getAccounts();
+    const spawnCostWei = this.spawnCostWei;
+    if (spawnCostWei <= 0n) {
+      throw new Error("Server misconfigured: spawnCostWei is not set");
     }
 
-    const deposit = await verifyDeposit(options.serverId, options.depositId, wallet);
-    if (!deposit) {
-      throw new Error("Invalid or missing deposit");
+    const ok = await accounts.transfer(`user:${wallet}`, "server:world_pool", spawnCostWei, `spawn:${client.sessionId}`);
+    if (!ok) {
+      throw new Error("Insufficient funds to spawn");
     }
 
-    const wasUnused = await tryUseDeposit(options.serverId, options.depositId);
-    if (!wasUnused) {
-      throw new Error("Deposit has already been used");
-    }
-
-    // Ensure pelletReserve + observed bankroll have this deposit (idempotent, centralized)
-    await applyDepositToBalances({
-      id: deposit.id,
-      serverId: options.serverId,
-      spawnAmountWei: deposit.spawnAmount,
-      worldAmountWei: deposit.worldAmount,
-    });
-
-    const spawnMass = payoutAmountToMass(deposit.spawnAmount, this.massPerEth);
+    const spawnMass = payoutAmountToMass(spawnCostWei, this.massPerEth);
 
     client.userData = {
       wallet,
-      depositId: options.depositId,
-      spawnMass: deposit.spawnAmount,
+      depositId: options.depositId as `0x${string}` | undefined,
+      spawnMass: spawnCostWei,
       privyClaims: auth.privyClaims,
     } as PlayerUserData;
 
@@ -251,7 +247,7 @@ export class GameRoom extends Room<GameState> {
       displayName,
       spawnMass,
     });
-    sim.depositId = options.depositId;
+    sim.depositId = options.depositId as `0x${string}` | undefined;
 
     console.log(`Player ${client.sessionId} spawned with mass ${spawnMass}`);
     this.sendInit(client);
@@ -379,7 +375,8 @@ export class GameRoom extends Room<GameState> {
     if (!sim || !sim.alive) return;
 
     let exitSessionId: `0x${string}` | null = null;
-    let reservedOk = false;
+    let reserved = false;
+
     try {
       const userData = client.userData as PlayerUserData;
       const sessionId = generateSessionId(userData.wallet, ++this.sessionNonce);
@@ -388,20 +385,54 @@ export class GameRoom extends Room<GameState> {
       const totalMass = this.engine.getPlayerTotalMass(client.sessionId);
       const payoutWei = massToPayoutAmount(totalMass, this.massPerEth);
 
-      const reserved = await reserveExitLiquidityWei({
-        serverId: config.serverId,
-        sessionId,
-        payoutWei,
-        ttlSeconds: config.exitTicketTtlSeconds,
-      });
-      reservedOk = reserved;
+      const accounts = getAccounts();
 
+      // 1. Reserve exit liquidity (bankroll -> exit_reserved with TTL tracking)
+      reserved = await accounts.reserveExit(sessionId, payoutWei, `exitReserve:${sessionId}`);
       if (!reserved) {
         client.send("exitError", { message: "Server temporarily out of funds, please try again." });
         this.cancelExit(client.sessionId);
         return;
       }
 
+      // 2. Convert in-world value back into a user balance
+      const credited = await accounts.transfer(
+        "server:world_pool",
+        `user:${userData.wallet.toLowerCase()}`,
+        payoutWei,
+        `exitCredit:${sessionId}`,
+      );
+      if (!credited) {
+        await accounts.releaseExit(sessionId, `exitRelease:${sessionId}`);
+        client.send("exitError", { message: "Exit failed, please try again." });
+        this.cancelExit(client.sessionId);
+        return;
+      }
+
+      // 3. Burn the user balance to trigger external exit
+      const burned = await accounts.withdraw(
+        `user:${userData.wallet.toLowerCase()}`,
+        payoutWei,
+        `exitWithdraw:${sessionId}`,
+      );
+      if (!burned) {
+        // Refund user + release reservation
+        await accounts.transfer(
+          `user:${userData.wallet.toLowerCase()}`,
+          "server:world_pool",
+          payoutWei,
+          `exitRefund:${sessionId}`,
+        );
+        await accounts.releaseExit(sessionId, `exitRelease2:${sessionId}`);
+        client.send("exitError", { message: "Exit failed, please try again." });
+        this.cancelExit(client.sessionId);
+        return;
+      }
+
+      // 4. Burn the reservation (exit is now finalized on-chain side)
+      await accounts.burnExitReservation(sessionId);
+
+      // 5. Create and send the signed exit ticket
       const ticket = await createExitTicket(sessionId, userData.wallet, payoutWei);
       await storeExitTicket(this.presence, ticket);
 
@@ -421,8 +452,9 @@ export class GameRoom extends Room<GameState> {
       this.removePlayer(client.sessionId);
     } catch (error) {
       console.error(`[GameRoom] completeExit failed for ${client.sessionId}:`, error);
-      if (reservedOk && exitSessionId) {
-        void releaseExitReservation(config.serverId, exitSessionId);
+      // Best-effort release on error (if we had reserved)
+      if (reserved && exitSessionId) {
+        void getAccounts().releaseExit(exitSessionId);
       }
       client.send("exitError", { message: "Exit failed, please try again." });
       this.cancelExit(client.sessionId);
@@ -451,7 +483,8 @@ export class GameRoom extends Room<GameState> {
     }
     if (recycledMass > 0) {
       const wei = massToPayoutAmount(recycledMass, this.massPerEth);
-      void creditPelletReserveWei(config.serverId, wei);
+      // Move value from world pool back into pellet budget (recycling).
+      void getAccounts().transfer("server:world_pool", "budget:pellets", wei);
     }
 
     // Spawn schedule (every 20 ticks): budgeted pellets + virus floor
@@ -499,7 +532,8 @@ export class GameRoom extends Room<GameState> {
         Math.floor(Math.random() * FFA_CONFIG.foodMaxMass);
 
       const costWei = massToPayoutAmount(mass, this.massPerEth);
-      const ok = await trySpendPelletReserveWei(config.serverId, costWei);
+      // Pellets are funded by moving budget -> world_pool.
+      const ok = await getAccounts().transfer("budget:pellets", "server:world_pool", costWei);
       if (!ok) break;
 
       this.engine.spawnRandomFood(mass);
@@ -627,7 +661,7 @@ export class GameRoom extends Room<GameState> {
 
   private async refreshBalancesAndMetadata() {
     try {
-      this.cachedPelletReserveWei = await getPelletReserveWei(config.serverId);
+      this.cachedPelletReserveWei = await getAccounts().getBalance("budget:pellets");
       this.state.worldBalance = this.cachedPelletReserveWei.toString();
       this.refreshMetadata();
     } catch (error) {

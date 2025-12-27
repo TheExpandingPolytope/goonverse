@@ -7,9 +7,8 @@ import express from "express";
 import { config as envConfig } from "./config.js";
 import { GameRoom } from "./rooms/GameRoom.js";
 import { verifyPrivyToken, getPrivyUser, getPrimaryWallet } from "./auth/privy.js";
-import { getPlayerDeposits, serverIdToBytes32 } from "./services/ponder.js";
-import { isDepositUsed } from "./services/depositTracker.js";
-import { startBalanceSync } from "./services/balance.js";
+import { getServer, serverIdToBytes32 } from "./services/ponder.js";
+import { getAccounts } from "./services/accounts.js";
 // Parse Redis URL into options object so we can disable ready check.
 // Ready check sends INFO command which fails if connection is already in subscriber mode.
 function parseRedisUrl(url) {
@@ -60,8 +59,8 @@ export default config({
         // Returns minimal payload for accurate latency timing
         app.get("/ping", (_req, res) => {
             // Ensure intermediaries don't cache (we time RTT).
-            res.setHeader("Cache-Control", "no-store");
             res.json({ ts: Date.now() });
+            console.log("Ping response:", { ts: Date.now() });
         });
         // Room listing endpoint - returns ALL rooms across ALL machines
         // Uses RedisDriver so matchMaker.query() sees rooms from all processes
@@ -214,43 +213,35 @@ export default config({
                 catch (error) {
                     console.error("Join eligibility: error while checking active entities:", error);
                 }
-                // 2. SPAWN PATH: No active entity; query indexer for player's deposits on this server
-                console.log("Getting player deposits for", wallet, "on server", serverId);
-                const deposits = await getPlayerDeposits(serverId, normalizedWallet);
-                if (deposits.length === 0) {
-                    console.log("No deposits found for", wallet, "on server", serverId);
+                // 2. SPAWN PATH: No active entity; check Redis hot-ledger user balance.
+                const serverCfg = await getServer(serverId);
+                if (!serverCfg) {
+                    res.status(400).json({ error: "Unknown serverId" });
+                    return;
+                }
+                const buyInWei = BigInt(serverCfg.buyInAmount ?? "0");
+                const rakeBps = BigInt(serverCfg.rakeShareBps ?? 0);
+                const worldBps = BigInt(serverCfg.worldShareBps ?? 0);
+                const spawnCostWei = buyInWei - (buyInWei * rakeBps) / 10000n - (buyInWei * worldBps) / 10000n;
+                const accounts = getAccounts();
+                const bal = await accounts.getBalance(`user:${normalizedWallet}`);
+                if (bal >= spawnCostWei) {
                     res.json({
-                        canJoin: false,
-                        reason: "deposit_required",
+                        canJoin: true,
+                        action: "spawn",
+                        spawnAmount: spawnCostWei.toString(),
                         wallet,
                         serverId,
                     });
                     return;
                 }
-                // Find first unused deposit
-                for (const deposit of deposits) {
-                    const used = await isDepositUsed(serverId, deposit.id);
-                    if (!used) {
-                        console.log("Found unused deposit", deposit.id, "for", wallet, "on server", serverId);
-                        res.json({
-                            canJoin: true,
-                            action: "spawn",
-                            depositId: deposit.id,
-                            spawnAmount: deposit.spawnAmount.toString(),
-                            wallet,
-                            serverId,
-                        });
-                        return;
-                    }
-                }
-                console.log("All deposits are used for", wallet, "on server", serverId);
-                // All deposits are used
                 res.json({
                     canJoin: false,
                     reason: "deposit_required",
                     wallet,
                     serverId,
-                    depositsChecked: deposits.length,
+                    requiredSpawnAmount: spawnCostWei.toString(),
+                    balance: bal.toString(),
                 });
             }
             catch (error) {
@@ -260,9 +251,6 @@ export default config({
         });
     },
     beforeListen: () => {
-        // Start background sync to keep pelletReserveWei (worldAmount) and observed bankroll
-        // up-to-date for this serverId, even when deposits occur while no one is in-game.
-        startBalanceSync({ serverId: envConfig.serverId });
         console.log(`Game server starting on port ${envConfig.port}`);
         console.log(`Server ID: ${envConfig.serverId}`);
         console.log(`Ponder URL: ${envConfig.ponderUrl}`);

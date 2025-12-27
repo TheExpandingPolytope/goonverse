@@ -1,5 +1,23 @@
 import { ponder } from "ponder:registry";
 import { servers, deposits, exits } from "ponder:schema";
+import Redis from "ioredis";
+import { AccountManager } from "@goonverse/accounts";
+
+const redisUri = process.env.REDIS_URL || process.env.REDIS_URI || "redis://localhost:6379";
+const redis = new Redis(redisUri, {
+  enableReadyCheck: false,
+  maxRetriesPerRequest: 3,
+});
+
+const accountsByServer = new Map<string, AccountManager>();
+function accountsFor(serverId: `0x${string}`): AccountManager {
+  const key = serverId.toLowerCase();
+  const existing = accountsByServer.get(key);
+  if (existing) return existing;
+  const mgr = new AccountManager(redis, key);
+  accountsByServer.set(key, mgr);
+  return mgr;
+}
 
 /**
  * Handle AddedServer event - create new server entry
@@ -109,6 +127,19 @@ ponder.on("World:Deposit", async ({ event, context }) => {
     timestamp: event.block.timestamp,
     txHash: event.transaction.hash,
   });
+
+  // Hot-ledger updates (Redis), idempotent per depositId.
+  const accounts = accountsFor(serverId);
+  const wallet = (player as `0x${string}`).toLowerCase();
+  const spawn = spawnAmount as bigint;
+  const world = worldAmount as bigint;
+  const totalBankrollCredit = spawn + world;
+
+  await Promise.all([
+    accounts.deposit(`user:${wallet}`, spawn, `deposit:user:${depositId}`),
+    accounts.deposit("budget:pellets", world, `deposit:budget:pellets:${depositId}`),
+    accounts.deposit("server:bankroll", totalBankrollCredit, `deposit:server:bankroll:${depositId}`),
+  ]);
 });
 
 /**
@@ -130,5 +161,18 @@ ponder.on("World:Exit", async ({ event, context }) => {
     timestamp: event.block.timestamp,
     txHash: event.transaction.hash,
   });
+
+  // Hot-ledger updates (Redis), idempotent per (serverId, sessionId).
+  //
+  // If the server reserved liquidity into `server:exit_reserved`, we burn from there first.
+  // If not reserved (older servers), fall back to debiting bankroll directly.
+  const accounts = accountsFor(serverId);
+  const amount = payout as bigint;
+  const sid = sessionId as `0x${string}`;
+
+  const reservedBurn = await accounts.withdraw("server:exit_reserved", amount, `exit:reserved:${sid}`);
+  if (!reservedBurn) {
+    await accounts.withdraw("server:bankroll", amount, `exit:bankroll:${sid}`);
+  }
 });
 

@@ -5,6 +5,7 @@ import { attachInputListeners } from './input'
 import { createDeltaWorldAdapter } from './adapters'
 import { createMockViewModelSource } from './mock'
 import { useGameClientContext } from '@/hooks/useGameSession'
+import { useHudActions } from '@/hooks/useHud'
 import { useEthUsdPrice } from '@/hooks/useEthUsdPrice'
 import { useUI } from '@/hooks/useUI'
 
@@ -13,6 +14,7 @@ export const World = () => {
   const { room, sessionId, getStateSnapshot, sendInput, phase } = useGameClientContext()
   const { ethUsd } = useEthUsdPrice()
   const { isOverlayVisible } = useUI()
+  const { setHud } = useHudActions()
 
   const mockGetViewModel = useMemo(() => createMockViewModelSource(), [])
 
@@ -59,11 +61,19 @@ export const World = () => {
 
   useEffect(() => {
     getViewModelRef.current = () => {
-      if (isOverlayVisible) return mockGetViewModel()
-      if (!adapter) return null
-      return adapter.getViewModel()
+      if (isOverlayVisible) {
+        setHud(null)
+        return mockGetViewModel()
+      }
+      if (!adapter) {
+        setHud(null)
+        return null
+      }
+      const vm = adapter.getViewModel()
+      setHud(vm?.hud ?? null)
+      return vm
     }
-  }, [isOverlayVisible, mockGetViewModel, adapter])
+  }, [isOverlayVisible, mockGetViewModel, adapter, setHud])
 
   useEffect(() => {
     const canvas = canvasRef.current

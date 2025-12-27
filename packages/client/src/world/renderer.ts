@@ -284,7 +284,6 @@ export const bootstrapRenderer = (
   // Green money colors
   const MONEY_COLOR = '#00FF88'
   const MONEY_STROKE = '#003322'
-  const bottomWorthText = new UText(32, MONEY_COLOR, true, MONEY_STROKE)
 
   // Simple skin support (optional; expects /skinList.txt and /skins/<name>.png)
   let knownSkins: Set<string> | null = null
@@ -648,104 +647,6 @@ export const bootstrapRenderer = (
     }
 
     ctx.restore()
-
-    // HUD (screen-space)
-    if (view.hud.showTopLeftStats !== false) {
-      const scoreText = `Mass: ${Math.floor(view.hud.currentMass)}`
-      const exitText = view.hud.exitHoldProgress > 0 ? `Exit: ${(view.hud.exitHoldProgress * 100).toFixed(0)}%` : null
-
-      ctx.save()
-      // Frosted glass panel effect
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.45)'
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)'
-      ctx.lineWidth = 1
-      ctx.beginPath()
-      ctx.roundRect(10, 10, 200, exitText ? 58 : 34, 8)
-      ctx.fill()
-      ctx.stroke()
-      ctx.restore()
-
-      ctx.fillStyle = '#FFFFFF'
-      ctx.textAlign = 'left'
-      ctx.textBaseline = 'top'
-      ctx.font = '600 18px Rubik'
-      ctx.fillText(scoreText, 18, 16)
-      if (exitText) {
-        ctx.fillStyle = MONEY_COLOR
-        ctx.font = '500 16px Rubik'
-        ctx.fillText(exitText, 18, 38)
-      }
-    }
-
-    // Bottom-center local worth
-    if (view.hud.showBottomWorth !== false) {
-      const text = formatUsd(view.hud.localUsdWorth, true)
-      bottomWorthText.setValue(text)
-      bottomWorthText.setScale(1)
-      const c = bottomWorthText.render()
-      const w = c.width
-      const h = c.height
-      ctx.drawImage(c, width / 2 - w / 2, height - 56, w, h)
-    }
-
-    // Leaderboard (top-right) — polished glass panel
-    if (view.hud.showLeaderboard !== false) {
-      const entries = view.hud.leaderboard
-      const maxRows = Math.min(entries.length, 12)
-      const minRows = 10
-      const panelW = 260
-      const panelX = width - panelW - 18
-      const panelY = 72
-      const rowH = 22
-      const rowsForPanel = Math.max(maxRows, minRows)
-      const panelH = 36 + rowsForPanel * rowH + 16
-
-      // Panel background with gradient border
-      ctx.save()
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.55)'
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)'
-      ctx.lineWidth = 1
-      ctx.beginPath()
-      ctx.roundRect(panelX, panelY, panelW, panelH, 12)
-      ctx.fill()
-      ctx.stroke()
-      ctx.restore()
-
-      // Title
-      ctx.textAlign = 'left'
-      ctx.textBaseline = 'top'
-      ctx.font = '700 14px Rubik'
-      ctx.fillStyle = '#FFFFFF'
-      ctx.fillText('Leaderboard', panelX + 14, panelY + 12)
-
-      for (let i = 0; i < maxRows; i++) {
-        const e = entries[i]
-        const yRow = panelY + 36 + i * rowH
-        
-        // Highlight local player row
-        if (e.isLocal) {
-          ctx.save()
-          ctx.fillStyle = 'rgba(0, 255, 136, 0.12)'
-          ctx.beginPath()
-          ctx.roundRect(panelX + 6, yRow - 2, panelW - 12, rowH, 4)
-          ctx.fill()
-          ctx.restore()
-        }
-        
-        // Rank and name
-        ctx.font = e.isLocal ? '600 13px Rubik' : '400 13px Rubik'
-        ctx.fillStyle = e.isLocal ? MONEY_COLOR : 'rgba(255,255,255,0.9)'
-        ctx.textAlign = 'left'
-        const name = e.displayName.length > 14 ? `${e.displayName.slice(0, 13)}…` : e.displayName
-        ctx.fillText(`${i + 1}. ${name}`, panelX + 14, yRow)
-        
-        // USD value in green
-        ctx.textAlign = 'right'
-        ctx.fillStyle = MONEY_COLOR
-        ctx.font = e.isLocal ? '600 13px Rubik' : '500 13px Rubik'
-        ctx.fillText(formatUsd(e.usdValue, true), panelX + panelW - 14, yRow)
-      }
-    }
 
     scheduleNext()
   }

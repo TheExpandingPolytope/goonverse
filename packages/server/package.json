@@ -10,6 +10,7 @@
     "test": "tsx --test src/rooms/sim/__tests__/math.test.ts"
   },
   "dependencies": {
+    "@goonverse/accounts": "file:../accounts",
     "@colyseus/redis-driver": "^0.16.0",
     "@colyseus/redis-presence": "^0.16.0",
     "@colyseus/monitor": "^0.16.0",

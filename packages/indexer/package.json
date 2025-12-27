@@ -12,9 +12,11 @@
     "typecheck": "tsc"
   },
   "dependencies": {
+    "@goonverse/accounts": "file:../accounts",
     "ponder": "^0.15.15",
     "abitype": "^0.10.2",
     "hono": "^4.5.0",
+    "ioredis": "^5.8.2",
     "viem": "^2.21.3"
   },
   "devDependencies": {

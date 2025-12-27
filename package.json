@@ -5,7 +5,7 @@
     "dev": "mprocs",
     "dev:infra": "mprocs postgres redis hardhat",
     "dev:backend": "mprocs ponder server",
-    "install:all": "npm install && npm install --prefix packages/contract && npm install --prefix packages/indexer && npm install --prefix packages/server",
+    "install:all": "npm install && npm install --prefix packages/contract && npm install --prefix packages/indexer && npm install --prefix packages/server && npm install --prefix packages/accounts",
     "sync:ignition": "node scripts/sync-ignition-deployments.mjs",
     "typecheck": "npm run typecheck --prefix packages/server",
     "test:contract": "npm test --prefix packages/contract"

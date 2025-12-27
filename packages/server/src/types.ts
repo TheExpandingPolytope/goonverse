@@ -33,7 +33,7 @@ export interface SerializedExitTicket {
  */
 export interface PlayerUserData {
   wallet: `0x${string}`;
-  depositId: `0x${string}`;
+  depositId?: `0x${string}`;
   spawnMass: bigint;
   privyClaims: PrivyClaims;
 }

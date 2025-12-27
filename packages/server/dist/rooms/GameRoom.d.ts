@@ -18,6 +18,8 @@ export declare class GameRoom extends Room<GameState> {
     private massPerEth;
     private sessionNonce;
     private buyInAmount;
+    private rakeShareBps;
+    private worldShareBps;
     private startedAt;
     private readonly engine;
     private tickCount;
@@ -27,6 +29,7 @@ export declare class GameRoom extends Room<GameState> {
     private readonly prevKeyStateBySession;
     private readonly exitHoldStartedAtBySession;
     private cachedPelletReserveWei;
+    private spawnCostWei;
     private sanitizeDisplayName;
     private deriveFallbackDisplayName;
     /**
