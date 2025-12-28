@@ -8,7 +8,7 @@ import { config as envConfig } from "./config.js";
 import { GameRoom } from "./rooms/GameRoom.js";
 import { verifyPrivyToken, getPrivyUser, getPrimaryWallet } from "./auth/privy.js";
 import { getServer, serverIdToBytes32 } from "./services/ponder.js";
-import { getAccounts } from "./services/accounts.js";
+import { getAccounts, getServerId } from "./services/accounts.js";
 
 // Parse Redis URL into options object so we can disable ready check.
 // Ready check sends INFO command which fails if connection is already in subscriber mode.
@@ -255,7 +255,7 @@ export default config({
         const spawnCostWei = buyInWei - (buyInWei * rakeBps) / 10_000n - (buyInWei * worldBps) / 10_000n;
 
         const accounts = getAccounts();
-        const bal = await accounts.getBalance(`user:${normalizedWallet}`);
+        const bal = await accounts.getBalance(getServerId(), `user:pending:spawn:${normalizedWallet}`);
 
         if (bal >= spawnCostWei) {
           res.json({
@@ -287,19 +287,6 @@ export default config({
     console.log(`Game server starting on port ${envConfig.port}`);
     console.log(`Server ID: ${envConfig.serverId}`);
     console.log(`Ponder URL: ${envConfig.ponderUrl}`);
-
-    // Periodically sweep expired exit reservations (every 60s)
-    const EXIT_SWEEP_INTERVAL_MS = 60_000;
-    setInterval(async () => {
-      try {
-        const swept = await getAccounts().sweepExpiredReservations(50);
-        if (swept > 0) {
-          console.log(`[exit-sweeper] Reclaimed ${swept} expired exit reservations`);
-        }
-      } catch (error) {
-        console.error("[exit-sweeper] Error sweeping expired reservations:", error);
-      }
-    }, EXIT_SWEEP_INTERVAL_MS);
+    // No sweeper needed - pending exits belong to users permanently
   },
 });
-

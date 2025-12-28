@@ -1,4 +1,4 @@
 /**
- * Internal types for AccountManager.
+ * Types for AccountManager.
  */
 export {};

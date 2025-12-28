@@ -1,17 +1,15 @@
 import type Redis from "ioredis";
-import {
-  DEFAULT_IDEMPOTENCY_TTL_SECONDS,
-  DEFAULT_EXIT_RESERVATION_TTL_SECONDS,
-  MAX_INT64,
-} from "./constants.js";
+import { keccak256, encodePacked, type Hex } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { DEFAULT_IDEMPOTENCY_TTL_SECONDS, DEFAULT_EXIT_TICKET_TTL_SECONDS, MAX_INT64 } from "./constants.js";
+import type { IdempotentRecord, OpType, ExitTicket, SerializedExitTicket, SigningConfig } from "./types.js";
 import { assertPositiveInt64, parseBalance, withOptimisticLock } from "./utils.js";
-import type { IdempotentRecord, OpType } from "./types.js";
 
-// Re-export types that consumers might need
-export type { IdempotentRecord, OpType } from "./types.js";
+// Re-export types for consumers
+export type { ExitTicket, SerializedExitTicket, SigningConfig } from "./types.js";
 
 // ============================================================================
-// Public Types
+// Types
 // ============================================================================
 
 export interface AccountManagerOptions {
@@ -20,11 +18,6 @@ export interface AccountManagerOptions {
    * Set to 0 to disable expiry (not recommended).
    */
   idempotencyTtlSeconds?: number;
-
-  /**
-   * TTL for exit reservations. Defaults to 24 hours.
-   */
-  exitReservationTtlSeconds?: number;
 
   /**
    * Upper bound guard for Redis INCRBY/DECRBY (int64 max).
@@ -43,21 +36,23 @@ export interface AccountManagerOptions {
  * Key structure:
  * - `acc:{serverId}:{accountName}` — balance (string integer)
  * - `idemp:{serverId}:{idempotencyKey}` — cached operation result
- * - `exitres:{serverId}:{sessionId}` — exit reservation amount
- * - `exitres:{serverId}:__index__` — sorted set of reservation expirations
+ *
+ * Account naming convention:
+ * - `user:pending:spawn:<wallet>` — deposit balance for spawning
+ * - `user:pending:exit:<wallet>` — pending exit funds
+ * - `server:world` — in-game world pool
+ * - `server:total` — total bankroll (mirrors on-chain)
+ * - `server:budget` — pellet spawning budget
  */
 export class AccountManager {
   private readonly redis: Redis;
-  private readonly serverId: string;
   private readonly idempotencyTtl: number;
-  private readonly exitReservationTtl: number;
   private readonly maxAmount: bigint;
+  private readonly serverIdCache = new Map<string, `0x${string}`>();
 
-  constructor(redis: Redis, serverId: string, options?: AccountManagerOptions) {
+  constructor(redis: Redis, options?: AccountManagerOptions) {
     this.redis = redis;
-    this.serverId = serverId;
     this.idempotencyTtl = options?.idempotencyTtlSeconds ?? DEFAULT_IDEMPOTENCY_TTL_SECONDS;
-    this.exitReservationTtl = options?.exitReservationTtlSeconds ?? DEFAULT_EXIT_RESERVATION_TTL_SECONDS;
     this.maxAmount = options?.maxAbsAmountWei ?? MAX_INT64;
   }
 
@@ -65,26 +60,42 @@ export class AccountManager {
   // Key Helpers
   // --------------------------------------------------------------------------
 
-  private keyAccount(name: string): string {
-    return `acc:${this.serverId}:${name}`;
+  /**
+   * Convert a serverId to bytes32 format.
+   * If already 66 chars (0x + 64 hex), return as-is.
+   * Otherwise, right-pad with zeros. Results are cached.
+   */
+  private toBytes32(serverId: string): `0x${string}` {
+    const cached = this.serverIdCache.get(serverId);
+    if (cached) return cached;
+
+    let result: `0x${string}`;
+    if (serverId.startsWith("0x") && serverId.length === 66) {
+      result = serverId.toLowerCase() as `0x${string}`;
+    } else {
+      const hex = Buffer.from(serverId, "utf8").toString("hex");
+      result = `0x${hex.padEnd(64, "0")}` as `0x${string}`;
+    }
+    this.serverIdCache.set(serverId, result);
+    return result;
   }
 
-  private keyIdemp(key: string): string {
-    return `idemp:${this.serverId}:${key}`;
+  private keyAccount(serverId: string, name: string): string {
+    return `acc:${this.toBytes32(serverId)}:${name}`;
   }
 
-  private keyExitRes(sessionId: string): string {
-    return `exitres:${this.serverId}:${sessionId}`;
-  }
-
-  private keyExitResIndex(): string {
-    return `exitres:${this.serverId}:__index__`;
+  private keyIdemp(serverId: string, key: string): string {
+    return `idemp:${this.toBytes32(serverId)}:${key}`;
   }
 
   // --------------------------------------------------------------------------
   // Idempotency Helpers
   // --------------------------------------------------------------------------
 
+  /**
+   * Check if an idempotency key already has a cached result.
+   * Returns the cached result or null if not found.
+   */
   private async getCachedResult(idKey: string, expectedOp: OpType): Promise<IdempotentRecord | null> {
     const raw = await this.redis.get(idKey);
     if (!raw) return null;
@@ -95,6 +106,9 @@ export class AccountManager {
     return record;
   }
 
+  /**
+   * Store an idempotency result with TTL.
+   */
   private async storeIdempResult(idKey: string, record: IdempotentRecord): Promise<void> {
     const json = JSON.stringify(record);
     if (this.idempotencyTtl > 0) {
@@ -104,6 +118,9 @@ export class AccountManager {
     }
   }
 
+  /**
+   * Queue idempotency result storage within a MULTI transaction.
+   */
   private queueIdempResult(tx: ReturnType<Redis["multi"]>, idKey: string, record: IdempotentRecord): void {
     const json = JSON.stringify(record);
     if (this.idempotencyTtl > 0) {
@@ -114,14 +131,90 @@ export class AccountManager {
   }
 
   // --------------------------------------------------------------------------
+  // Signing Helpers
+  // --------------------------------------------------------------------------
+
+  /**
+   * Create and sign an exit ticket.
+   */
+  private async signExitTicket(
+    serverIdBytes32: `0x${string}`,
+    sessionId: `0x${string}`,
+    player: `0x${string}`,
+    payout: bigint,
+    signingConfig: SigningConfig,
+  ): Promise<ExitTicket> {
+    const account = privateKeyToAccount(signingConfig.controllerPrivateKey);
+    const ttl = signingConfig.exitTicketTtlSeconds ?? DEFAULT_EXIT_TICKET_TTL_SECONDS;
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + ttl);
+
+    // Create the message hash matching World.sol's abi.encodePacked format
+    const messageHash = keccak256(
+      encodePacked(
+        ["address", "bytes32", "bytes32", "address", "uint256", "uint256"],
+        [
+          signingConfig.worldContractAddress,
+          serverIdBytes32,
+          sessionId,
+          player,
+          payout,
+          deadline,
+        ]
+      )
+    );
+
+    // Sign the message (signMessage automatically applies EIP-191 prefix)
+    const signature = await account.signMessage({
+      message: { raw: messageHash as Hex },
+    });
+
+    return {
+      serverId: serverIdBytes32,
+      sessionId,
+      player,
+      payout,
+      deadline,
+      signature: signature as `0x${string}`,
+    };
+  }
+
+  /**
+   * Serialize an ExitTicket for JSON storage/transport.
+   */
+  private serializeTicket(ticket: ExitTicket): SerializedExitTicket {
+    return {
+      serverId: ticket.serverId,
+      sessionId: ticket.sessionId,
+      player: ticket.player,
+      payout: ticket.payout.toString(),
+      deadline: ticket.deadline.toString(),
+      signature: ticket.signature,
+    };
+  }
+
+  /**
+   * Deserialize a SerializedExitTicket back to ExitTicket.
+   */
+  private deserializeTicket(serialized: SerializedExitTicket): ExitTicket {
+    return {
+      serverId: serialized.serverId as `0x${string}`,
+      sessionId: serialized.sessionId as `0x${string}`,
+      player: serialized.player as `0x${string}`,
+      payout: BigInt(serialized.payout),
+      deadline: BigInt(serialized.deadline),
+      signature: serialized.signature as `0x${string}`,
+    };
+  }
+
+  // --------------------------------------------------------------------------
   // Public: Read Operations
   // --------------------------------------------------------------------------
 
   /**
    * Get the current balance of an account.
    */
-  async getBalance(accountName: string): Promise<bigint> {
-    const raw = await this.redis.get(this.keyAccount(accountName));
+  async getBalance(serverId: string, accountName: string): Promise<bigint> {
+    const raw = await this.redis.get(this.keyAccount(serverId, accountName));
     return parseBalance(raw);
   }
 
@@ -135,11 +228,16 @@ export class AccountManager {
    * If `idempotencyKey` is provided, the operation is idempotent:
    * retries with the same key return the cached result.
    */
-  async deposit(accountName: string, amountWei: bigint, idempotencyKey?: string): Promise<bigint> {
+  async deposit(
+    serverId: string,
+    accountName: string,
+    amountWei: bigint,
+    idempotencyKey?: string,
+  ): Promise<bigint> {
     assertPositiveInt64(amountWei, this.maxAmount);
-    if (amountWei === 0n) return this.getBalance(accountName);
+    if (amountWei === 0n) return this.getBalance(serverId, accountName);
 
-    const balKey = this.keyAccount(accountName);
+    const balKey = this.keyAccount(serverId, accountName);
 
     // Fast path: no idempotency
     if (!idempotencyKey) {
@@ -148,7 +246,7 @@ export class AccountManager {
     }
 
     // Idempotent path
-    const idKey = this.keyIdemp(idempotencyKey);
+    const idKey = this.keyIdemp(serverId, idempotencyKey);
 
     return withOptimisticLock(this.redis, [balKey, idKey], async () => {
       const cached = await this.getCachedResult(idKey, "deposit");
@@ -157,7 +255,7 @@ export class AccountManager {
       const tx = this.redis.multi();
       tx.incrby(balKey, amountWei.toString());
       const exec = await tx.exec();
-      if (!exec) return null;
+      if (!exec) return null; // WATCH failed, retry
 
       const newBal = String(exec[0]?.[1] ?? "0");
       await this.storeIdempResult(idKey, { ok: true, op: "deposit", newBalanceWei: newBal });
@@ -166,20 +264,25 @@ export class AccountManager {
   }
 
   // --------------------------------------------------------------------------
-  // Public: Withdraw
+  // Public: Burn
   // --------------------------------------------------------------------------
 
   /**
-   * Debit an account by `amountWei`. Returns true if successful, false if
-   * insufficient balance.
+   * Debit an account by `amountWei` without crediting anywhere (destroy funds).
+   * Returns true if successful, false if insufficient balance.
    *
    * If `idempotencyKey` is provided, the operation is idempotent.
    */
-  async withdraw(accountName: string, amountWei: bigint, idempotencyKey?: string): Promise<boolean> {
+  async burn(
+    serverId: string,
+    accountName: string,
+    amountWei: bigint,
+    idempotencyKey?: string,
+  ): Promise<boolean> {
     assertPositiveInt64(amountWei, this.maxAmount);
     if (amountWei === 0n) return true;
 
-    const balKey = this.keyAccount(accountName);
+    const balKey = this.keyAccount(serverId, accountName);
 
     // Fast path: no idempotency
     if (!idempotencyKey) {
@@ -195,10 +298,10 @@ export class AccountManager {
     }
 
     // Idempotent path
-    const idKey = this.keyIdemp(idempotencyKey);
+    const idKey = this.keyIdemp(serverId, idempotencyKey);
 
     return withOptimisticLock(this.redis, [balKey, idKey], async () => {
-      const cached = await this.getCachedResult(idKey, "withdraw");
+      const cached = await this.getCachedResult(idKey, "burn");
       if (cached) return cached.ok;
 
       const current = parseBalance(await this.redis.get(balKey));
@@ -206,7 +309,7 @@ export class AccountManager {
 
       const tx = this.redis.multi();
       if (ok) tx.decrby(balKey, amountWei.toString());
-      this.queueIdempResult(tx, idKey, { ok, op: "withdraw" });
+      this.queueIdempResult(tx, idKey, { ok, op: "burn" });
 
       const exec = await tx.exec();
       return exec ? ok : null;
@@ -224,6 +327,7 @@ export class AccountManager {
    * If `idempotencyKey` is provided, the operation is idempotent.
    */
   async transfer(
+    serverId: string,
     fromAccountName: string,
     toAccountName: string,
     amountWei: bigint,
@@ -232,8 +336,8 @@ export class AccountManager {
     assertPositiveInt64(amountWei, this.maxAmount);
     if (amountWei === 0n) return true;
 
-    const fromKey = this.keyAccount(fromAccountName);
-    const toKey = this.keyAccount(toAccountName);
+    const fromKey = this.keyAccount(serverId, fromAccountName);
+    const toKey = this.keyAccount(serverId, toAccountName);
 
     // Fast path: no idempotency
     if (!idempotencyKey) {
@@ -250,7 +354,7 @@ export class AccountManager {
     }
 
     // Idempotent path
-    const idKey = this.keyIdemp(idempotencyKey);
+    const idKey = this.keyIdemp(serverId, idempotencyKey);
 
     return withOptimisticLock(this.redis, [fromKey, toKey, idKey], async () => {
       const cached = await this.getCachedResult(idKey, "transfer");
@@ -272,165 +376,99 @@ export class AccountManager {
   }
 
   // --------------------------------------------------------------------------
-  // Public: Exit Reservations
+  // Public: Withdraw (Exit)
   // --------------------------------------------------------------------------
 
   /**
-   * Reserve exit liquidity for a session. Moves `payoutWei` from
-   * `server:bankroll` to `server:exit_reserved` and tracks it by sessionId.
+   * Withdraw funds from server:world to user:pending:exit and create a signed exit ticket.
    *
-   * Returns true if reservation succeeded, false if insufficient bankroll.
+   * This is the main exit function:
+   * 1. Transfers `amountWei` from `server:world` to `user:pending:exit:<wallet>`
+   * 2. Signs and returns an ExitTicket
+   *
+   * Returns the ExitTicket if successful, null if insufficient balance in server:world.
+   *
+   * @param serverId - Server identifier (will be normalized to bytes32)
+   * @param wallet - Player's wallet address (will be lowercased)
+   * @param amountWei - Payout amount in wei
+   * @param sessionId - Unique session ID for the exit ticket
+   * @param signingConfig - Controller key and world address for signing
+   * @param idempotencyKey - Optional idempotency key for retry safety
    */
-  async reserveExit(sessionId: string, payoutWei: bigint, idempotencyKey?: string): Promise<boolean> {
-    assertPositiveInt64(payoutWei, this.maxAmount);
-    if (payoutWei === 0n) return true;
+  async withdraw(
+    serverId: string,
+    wallet: `0x${string}`,
+    amountWei: bigint,
+    sessionId: `0x${string}`,
+    signingConfig: SigningConfig,
+    idempotencyKey?: string,
+  ): Promise<ExitTicket | null> {
+    assertPositiveInt64(amountWei, this.maxAmount);
 
-    const bankrollKey = this.keyAccount("server:bankroll");
-    const reservedKey = this.keyAccount("server:exit_reserved");
-    const resKey = this.keyExitRes(sessionId);
-    const indexKey = this.keyExitResIndex();
-    const expiresAt = Date.now() + this.exitReservationTtl * 1000;
+    const serverIdBytes32 = this.toBytes32(serverId);
+    const normalizedWallet = wallet.toLowerCase() as `0x${string}`;
 
+    if (amountWei === 0n) {
+      // Zero payout - still return a valid ticket
+      return this.signExitTicket(serverIdBytes32, sessionId, normalizedWallet, 0n, signingConfig);
+    }
+
+    const fromKey = this.keyAccount(serverId, "server:world");
+    const toKey = this.keyAccount(serverId, `user:pending:exit:${normalizedWallet}`);
+
+    // Fast path: no idempotency
     if (!idempotencyKey) {
-      return withOptimisticLock(this.redis, [bankrollKey, reservedKey, resKey], async () => {
-        const bankroll = parseBalance(await this.redis.get(bankrollKey));
-        if (bankroll < payoutWei) return false;
+      const transferred = await withOptimisticLock(this.redis, [fromKey, toKey], async () => {
+        const fromBal = parseBalance(await this.redis.get(fromKey));
+        if (fromBal < amountWei) return false;
 
         const tx = this.redis.multi();
-        tx.decrby(bankrollKey, payoutWei.toString());
-        tx.incrby(reservedKey, payoutWei.toString());
-        tx.set(resKey, payoutWei.toString());
-        tx.zadd(indexKey, expiresAt, sessionId);
+        tx.decrby(fromKey, amountWei.toString());
+        tx.incrby(toKey, amountWei.toString());
         const exec = await tx.exec();
         return exec ? true : null;
       });
+
+      if (!transferred) return null;
+      return this.signExitTicket(serverIdBytes32, sessionId, normalizedWallet, amountWei, signingConfig);
     }
 
-    const idKey = this.keyIdemp(idempotencyKey);
+    // Idempotent path
+    const idKey = this.keyIdemp(serverId, idempotencyKey);
 
-    return withOptimisticLock(this.redis, [bankrollKey, reservedKey, resKey, idKey], async () => {
-      const cached = await this.getCachedResult(idKey, "reserveExit");
-      if (cached) return cached.ok;
-
-      const bankroll = parseBalance(await this.redis.get(bankrollKey));
-      const ok = bankroll >= payoutWei;
-
-      const tx = this.redis.multi();
-      if (ok) {
-        tx.decrby(bankrollKey, payoutWei.toString());
-        tx.incrby(reservedKey, payoutWei.toString());
-        tx.set(resKey, payoutWei.toString());
-        tx.zadd(indexKey, expiresAt, sessionId);
+    return withOptimisticLock(this.redis, [fromKey, toKey, idKey], async () => {
+      const cached = await this.getCachedResult(idKey, "withdraw");
+      if (cached && cached.op === "withdraw") {
+        if (!cached.ok) return null;
+        // Return cached ticket
+        if (cached.ticket) {
+          return this.deserializeTicket(cached.ticket);
+        }
+        // Ticket missing from cache (shouldn't happen), regenerate
+        return this.signExitTicket(serverIdBytes32, sessionId, normalizedWallet, amountWei, signingConfig);
       }
-      this.queueIdempResult(tx, idKey, { ok, op: "reserveExit" });
 
-      const exec = await tx.exec();
-      return exec ? ok : null;
-    });
-  }
+      const fromBal = parseBalance(await this.redis.get(fromKey));
+      const ok = fromBal >= amountWei;
 
-  /**
-   * Release a previously reserved exit. Moves the reserved amount back to
-   * `server:bankroll` and removes the reservation tracking.
-   *
-   * Returns true if released, false if no reservation found.
-   */
-  async releaseExit(sessionId: string, idempotencyKey?: string): Promise<boolean> {
-    const bankrollKey = this.keyAccount("server:bankroll");
-    const reservedKey = this.keyAccount("server:exit_reserved");
-    const resKey = this.keyExitRes(sessionId);
-    const indexKey = this.keyExitResIndex();
-
-    if (!idempotencyKey) {
-      return withOptimisticLock(this.redis, [bankrollKey, reservedKey, resKey], async () => {
-        const amountRaw = await this.redis.get(resKey);
-        if (!amountRaw) return false;
-        const amount = BigInt(amountRaw);
-
-        const tx = this.redis.multi();
-        tx.incrby(bankrollKey, amount.toString());
-        tx.decrby(reservedKey, amount.toString());
-        tx.del(resKey);
-        tx.zrem(indexKey, sessionId);
-        const exec = await tx.exec();
-        return exec ? true : null;
-      });
-    }
-
-    const idKey = this.keyIdemp(idempotencyKey);
-
-    return withOptimisticLock(this.redis, [bankrollKey, reservedKey, resKey, idKey], async () => {
-      const cached = await this.getCachedResult(idKey, "releaseExit");
-      if (cached) return cached.ok;
-
-      const amountRaw = await this.redis.get(resKey);
-      const ok = !!amountRaw;
-      const amount = amountRaw ? BigInt(amountRaw) : 0n;
-
-      const tx = this.redis.multi();
-      if (ok) {
-        tx.incrby(bankrollKey, amount.toString());
-        tx.decrby(reservedKey, amount.toString());
-        tx.del(resKey);
-        tx.zrem(indexKey, sessionId);
+      if (!ok) {
+        // Store failure result
+        await this.storeIdempResult(idKey, { ok: false, op: "withdraw" });
+        return null;
       }
-      this.queueIdempResult(tx, idKey, { ok, op: "releaseExit" });
 
-      const exec = await tx.exec();
-      return exec ? ok : null;
-    });
-  }
-
-  /**
-   * Sweep expired exit reservations, returning funds to bankroll.
-   * Call periodically (e.g., every minute) to reclaim abandoned reservations.
-   *
-   * @param limit Max number of reservations to sweep per call (default 100).
-   * @returns Number of reservations swept.
-   */
-  async sweepExpiredReservations(limit = 100): Promise<number> {
-    const indexKey = this.keyExitResIndex();
-    const now = Date.now();
-
-    const expired = await this.redis.zrangebyscore(indexKey, 0, now, "LIMIT", 0, limit);
-    if (expired.length === 0) return 0;
-
-    let swept = 0;
-    for (const sessionId of expired) {
-      const released = await this.releaseExit(sessionId);
-      if (released) swept++;
-    }
-    return swept;
-  }
-
-  /**
-   * Get the reserved amount for a specific session, or null if not found.
-   */
-  async getExitReservation(sessionId: string): Promise<bigint | null> {
-    const raw = await this.redis.get(this.keyExitRes(sessionId));
-    return raw ? BigInt(raw) : null;
-  }
-
-  /**
-   * Burn a reservation without returning to bankroll (for successful exits).
-   * This removes the reservation tracking and debits `server:exit_reserved`.
-   */
-  async burnExitReservation(sessionId: string): Promise<boolean> {
-    const reservedKey = this.keyAccount("server:exit_reserved");
-    const resKey = this.keyExitRes(sessionId);
-    const indexKey = this.keyExitResIndex();
-
-    return withOptimisticLock(this.redis, [reservedKey, resKey], async () => {
-      const amountRaw = await this.redis.get(resKey);
-      if (!amountRaw) return false;
-      const amount = BigInt(amountRaw);
+      // Sign ticket first (before committing transfer)
+      const ticket = await this.signExitTicket(serverIdBytes32, sessionId, normalizedWallet, amountWei, signingConfig);
 
       const tx = this.redis.multi();
-      tx.decrby(reservedKey, amount.toString());
-      tx.del(resKey);
-      tx.zrem(indexKey, sessionId);
+      tx.decrby(fromKey, amountWei.toString());
+      tx.incrby(toKey, amountWei.toString());
+      this.queueIdempResult(tx, idKey, { ok: true, op: "withdraw", ticket: this.serializeTicket(ticket) });
+
       const exec = await tx.exec();
-      return exec ? true : null;
+      if (!exec) return null; // WATCH failed, retry
+
+      return ticket;
     });
   }
 }

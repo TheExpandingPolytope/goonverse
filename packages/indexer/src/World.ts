@@ -9,15 +9,7 @@ const redis = new Redis(redisUri, {
   maxRetriesPerRequest: 3,
 });
 
-const accountsByServer = new Map<string, AccountManager>();
-function accountsFor(serverId: `0x${string}`): AccountManager {
-  const key = serverId.toLowerCase();
-  const existing = accountsByServer.get(key);
-  if (existing) return existing;
-  const mgr = new AccountManager(redis, key);
-  accountsByServer.set(key, mgr);
-  return mgr;
-}
+const accounts = new AccountManager(redis);
 
 /**
  * Handle AddedServer event - create new server entry
@@ -111,6 +103,11 @@ ponder.on("World:RemovedServer", async ({ event, context }) => {
 
 /**
  * Handle Deposit event - record player deposit with fee breakdown
+ * 
+ * Credits:
+ * - user:pending:spawn:<wallet> with spawnAmount (player's spawnable balance)
+ * - server:budget with worldAmount (pellet spawning budget)
+ * - server:total with spawnAmount + worldAmount (total bankroll)
  */
 ponder.on("World:Deposit", async ({ event, context }) => {
   const { player, serverId, depositId, amount, spawnAmount, worldAmount, rakeAmount } = event.args;
@@ -129,21 +126,24 @@ ponder.on("World:Deposit", async ({ event, context }) => {
   });
 
   // Hot-ledger updates (Redis), idempotent per depositId.
-  const accounts = accountsFor(serverId);
   const wallet = (player as `0x${string}`).toLowerCase();
   const spawn = spawnAmount as bigint;
   const world = worldAmount as bigint;
   const totalBankrollCredit = spawn + world;
 
   await Promise.all([
-    accounts.deposit(`user:${wallet}`, spawn, `deposit:user:${depositId}`),
-    accounts.deposit("budget:pellets", world, `deposit:budget:pellets:${depositId}`),
-    accounts.deposit("server:bankroll", totalBankrollCredit, `deposit:server:bankroll:${depositId}`),
+    accounts.deposit(serverId, `user:pending:spawn:${wallet}`, spawn, `deposit:spawn:${depositId}`),
+    accounts.deposit(serverId, "server:budget", world, `deposit:budget:${depositId}`),
+    accounts.deposit(serverId, "server:total", totalBankrollCredit, `deposit:total:${depositId}`),
   ]);
 });
 
 /**
  * Handle Exit event - record player cashout
+ * 
+ * Burns:
+ * - user:pending:exit:<wallet> by payout (user claimed their pending exit)
+ * - server:total by payout (reflects on-chain bankroll reduction)
  */
 ponder.on("World:Exit", async ({ event, context }) => {
   const { player, serverId, sessionId, payout } = event.args;
@@ -162,17 +162,15 @@ ponder.on("World:Exit", async ({ event, context }) => {
     txHash: event.transaction.hash,
   });
 
-  // Hot-ledger updates (Redis), idempotent per (serverId, sessionId).
-  //
-  // If the server reserved liquidity into `server:exit_reserved`, we burn from there first.
-  // If not reserved (older servers), fall back to debiting bankroll directly.
-  const accounts = accountsFor(serverId);
+  // Hot-ledger updates (Redis), idempotent per sessionId.
+  const wallet = (player as `0x${string}`).toLowerCase();
   const amount = payout as bigint;
   const sid = sessionId as `0x${string}`;
 
-  const reservedBurn = await accounts.withdraw("server:exit_reserved", amount, `exit:reserved:${sid}`);
-  if (!reservedBurn) {
-    await accounts.withdraw("server:bankroll", amount, `exit:bankroll:${sid}`);
-  }
+  await Promise.all([
+    // Burn user's pending exit balance (they've claimed it on-chain)
+    accounts.burn(serverId, `user:pending:exit:${wallet}`, amount, `exit:pending:${sid}`),
+    // Burn server total to reflect on-chain bankroll reduction
+    accounts.burn(serverId, "server:total", amount, `exit:total:${sid}`),
+  ]);
 });
-
