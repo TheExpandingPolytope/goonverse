@@ -11,7 +11,7 @@ import {
   massToPayoutAmount,
   payoutAmountToMass,
 } from "../services/exitController.js";
-import { getAccounts, getServerId, getSigningConfig } from "../services/accounts.js";
+import { ledger, serverId, signingConfig } from "../services/accounts.js";
 import { config } from "../config.js";
 import type { PlayerUserData, AuthContext } from "../types.js";
 import type { SerializedExitTicket } from "@goonverse/accounts";
@@ -210,14 +210,12 @@ export class GameRoom extends Room<GameState> {
     }
 
     // SPAWN FLOW: consume hot-ledger balance (user:pending:spawn -> server:world)
-    const accounts = getAccounts();
-    const serverId = getServerId();
     const spawnCostWei = this.spawnCostWei;
     if (spawnCostWei <= 0n) {
       throw new Error("Server misconfigured: spawnCostWei is not set");
     }
 
-    const ok = await accounts.transfer(
+    const ok = await ledger.transfer(
       serverId,
       `user:pending:spawn:${wallet}`,
       "server:world",
@@ -384,16 +382,13 @@ export class GameRoom extends Room<GameState> {
       const totalMass = this.engine.getPlayerTotalMass(client.sessionId);
       const payoutWei = massToPayoutAmount(totalMass, this.massPerEth);
 
-      const accounts = getAccounts();
-      const serverId = getServerId();
-
       // withdraw() atomically moves funds and signs the ticket
-      const ticket = await accounts.withdraw(
+      const ticket = await ledger.withdraw(
         serverId,
         userData.wallet,
         payoutWei,
         sessionId,
-        getSigningConfig(),
+        signingConfig,
         `exit:${sessionId}`
       );
 
@@ -448,7 +443,7 @@ export class GameRoom extends Room<GameState> {
     if (recycledMass > 0) {
       const wei = massToPayoutAmount(recycledMass, this.massPerEth);
       // Move value from world pool back into pellet budget (recycling).
-      void getAccounts().transfer(getServerId(), "server:world", "server:budget", wei);
+      void ledger.transfer(serverId, "server:world", "server:budget", wei);
     }
 
     // Spawn schedule (every 20 ticks): budgeted pellets + virus floor
@@ -497,7 +492,7 @@ export class GameRoom extends Room<GameState> {
 
       const costWei = massToPayoutAmount(mass, this.massPerEth);
       // Pellets are funded by moving budget -> world.
-      const ok = await getAccounts().transfer(getServerId(), "server:budget", "server:world", costWei);
+      const ok = await ledger.transfer(serverId, "server:budget", "server:world", costWei);
       if (!ok) break;
 
       this.engine.spawnRandomFood(mass);
@@ -625,7 +620,7 @@ export class GameRoom extends Room<GameState> {
 
   private async refreshBalancesAndMetadata() {
     try {
-      this.cachedPelletReserveWei = await getAccounts().getBalance(getServerId(), "server:budget");
+      this.cachedPelletReserveWei = await ledger.getBalance(serverId, "server:budget");
       this.state.worldBalance = this.cachedPelletReserveWei.toString();
       this.refreshMetadata();
     } catch (error) {

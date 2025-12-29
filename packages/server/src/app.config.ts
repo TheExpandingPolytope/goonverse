@@ -8,7 +8,7 @@ import { config as envConfig } from "./config.js";
 import { GameRoom } from "./rooms/GameRoom.js";
 import { verifyPrivyToken, getPrivyUser, getPrimaryWallet } from "./auth/privy.js";
 import { getServer, serverIdToBytes32 } from "./services/ponder.js";
-import { getAccounts, getServerId } from "./services/accounts.js";
+import { ledger, serverId as ledgerServerId } from "./services/accounts.js";
 
 // Parse Redis URL into options object so we can disable ready check.
 // Ready check sends INFO command which fails if connection is already in subscriber mode.
@@ -254,8 +254,7 @@ export default config({
         const worldBps = BigInt(serverCfg.worldShareBps ?? 0);
         const spawnCostWei = buyInWei - (buyInWei * rakeBps) / 10_000n - (buyInWei * worldBps) / 10_000n;
 
-        const accounts = getAccounts();
-        const bal = await accounts.getBalance(getServerId(), `user:pending:spawn:${normalizedWallet}`);
+        const bal = await ledger.getBalance(ledgerServerId, `user:pending:spawn:${normalizedWallet}`);
 
         if (bal >= spawnCostWei) {
           res.json({
