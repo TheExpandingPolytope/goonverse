@@ -1,6 +1,9 @@
 import type { RoomSummary } from '@/types/rooms'
 import { isSnapshotReady } from './snapshot'
-import { massToUsd } from '@/lib/formatter'
+import { formatUsd, massToEth, massToUsd } from '@/lib/formatter'
+
+const MASS_SCALE = 10_000
+const PROTOCOL_VERSION = 4
 
 // Existing lobby summary helper
 export const summarizeServer = (room: RoomSummary) => ({
@@ -14,11 +17,23 @@ export const summarizeServer = (room: RoomSummary) => ({
 // Mirrors the server's InputMessage (see GameState.ts), but kept local here
 // so the client does not depend directly on server source files.
 export type ClientInputMessage = {
-  x: number
-  y: number
-  q: boolean // exit trigger (hold Q)
-  space: boolean // split trigger (tap Spacebar)
-  w: boolean // eject mass trigger (Key W)
+  // Movement
+  w: boolean
+  a: boolean
+  s: boolean
+  d: boolean
+
+  // Aim
+  aimX: number
+  aimY: number
+
+  // Holds
+  shoot: boolean
+  dash: boolean
+  exit: boolean
+
+  // Optional reconciliation
+  clientTick?: number
 }
 
 // Minimal, renderer-friendly view of a blob
@@ -35,6 +50,19 @@ export type BlobView = {
   isExiting: boolean
   exitProgress: number // 0-1
   exitRadius: number // already-shrunk radius for rendering while exiting
+  vx: number
+  vy: number
+  aimX: number
+  aimY: number
+  dashChargeRatio: number
+  shootChargeRatio: number
+  dashCooldownTicks: number
+  dashActiveTicks: number
+  stunTicks: number
+  slowTicks: number
+  shootRecoveryTicks: number
+  exitCombatTagTicks: number
+  hitFlashTicks: number
 }
 
 export type PelletView = {
@@ -45,6 +73,8 @@ export type PelletView = {
   color: string
   mass: number
   usdValue: number
+  locked?: boolean
+  unlockPop?: number
 }
 
 export type EjectedMassView = {
@@ -53,6 +83,13 @@ export type EjectedMassView = {
   y: number
   radius: number
   color: string
+}
+
+export type BulletView = {
+  id: string
+  x: number
+  y: number
+  radius: number
 }
 
 export type VirusView = {
@@ -73,19 +110,39 @@ export type WorldViewModel = {
     width: number
     height: number
   }
+  // Dynamic circular border (POC parity)
+  border: {
+    radius: number
+    targetRadius: number
+    velocity: number
+    maxRadius: number
+    minRadius: number
+  }
   playerBlobs: BlobView[]
   otherBlobs: BlobView[]
   pellets: PelletView[]
   ejectedMass: EjectedMassView[]
+  bullets: BulletView[]
   viruses: VirusView[]
   hud: {
     currentMass: number
     spawnMass: number
     payoutEstimate: number
     exitHoldProgress: number // 0-1
+    dashCooldownTicks?: number
+    shootChargeRatio?: number
+    shootRecoveryTicks?: number
+    stunTicks?: number
+    slowTicks?: number
+    exitCombatTagTicks?: number
+    pnlPct?: number
+    pnlUsd?: number
+    events?: Array<{ id: number; message: string; variant: 'exit' | 'warn' | 'danger' }>
+    transactions?: Array<{ id: number; amount: number; type: 'gain' | 'loss' }>
     pingMs?: number
     serverLabel?: string
     localUsdWorth: number
+    localEthWorth: number
     /** Optional: allow hiding certain HUD widgets (useful for mock/demo backgrounds). */
     showTopLeftStats?: boolean
     /** Optional: allow hiding certain HUD widgets (useful for mock/demo backgrounds). */
@@ -96,6 +153,7 @@ export type WorldViewModel = {
       sessionId: string
       displayName: string
       usdValue: number
+      ethValue: number
       isLocal: boolean
     }>
   }
@@ -106,12 +164,13 @@ export type WorldViewModel = {
 export type WorldInputController = {
   onPointerMove: (pos: { x: number; y: number }) => void
   onWheelZoom: (event: { deltaY: number }) => void
+  onMoveKeyChange: (state: Partial<Pick<ClientInputMessage, 'w' | 'a' | 's' | 'd'>>) => void
+  onShootKeyDown: () => void
+  onShootKeyUp: () => void
+  onDashKeyDown: () => void
+  onDashKeyUp: () => void
   onExitKeyDown: () => void
   onExitKeyUp: () => void
-  onSplitKeyDown: () => void
-  onSplitKeyUp: () => void
-  onEjectKeyDown: () => void
-  onEjectKeyUp: () => void
 }
 
 export type WorldAdapter = {
@@ -179,6 +238,7 @@ type ServerGameState = {
   worldHeight: number
   exitHoldMs: number
   massPerEth: number
+  massScale?: number
 }
 
 export type CreateWorldAdapterOptions = {
@@ -200,17 +260,23 @@ export const createWorldAdapter = ({
   let pointerX = 0.5
   let pointerY = 0.5
   let exitKeyHeld = false
-  let splitHeld = false
-  let ejectHeld = false
+  let dashHeld = false
+  let shootHeld = false
+  let wHeld = false
+  let aHeld = false
+  let sHeld = false
+  let dHeld = false
 
   const buildViewModel = (state: ServerGameState): WorldViewModel => {
     const worldWidth = state.worldWidth ?? 4000
     const worldHeight = state.worldHeight ?? 4000
+    const massScale = (state as { massScale?: number })?.massScale ?? MASS_SCALE
 
     const playerBlobs: BlobView[] = []
     const otherBlobs: BlobView[] = []
     const pellets: PelletView[] = []
     const ejectedMass: EjectedMassView[] = []
+    const bullets: BulletView[] = []
 
     let localPlayer: ServerPlayer | null = null
     const nameBySessionId = new Map<string, string>()
@@ -234,13 +300,14 @@ export const createWorldAdapter = ({
       // Defensive: during initial join, some clients may observe partially
       // hydrated schema objects briefly.
       player.blobs?.forEach?.((blob: ServerBlob) => {
-        const usdValue = massToUsd(blob.mass, state.massPerEth ?? 100, ethUsd)
+        const displayMass = blob.mass / massScale
+        const usdValue = massToUsd(displayMass, state.massPerEth ?? 100, ethUsd)
         const base: BlobView = {
           id: blob.id,
           x: blob.x,
           y: blob.y,
           radius: blob.radius,
-          mass: blob.mass,
+          mass: displayMass,
           color: `hsl(${player.color * 30}, 80%, 60%)`,
           displayName,
           usdValue,
@@ -250,6 +317,19 @@ export const createWorldAdapter = ({
           exitRadius: blob.isExiting && blob.originalRadius
             ? blob.originalRadius * (1 - (blob.exitProgress ?? 0))
             : blob.radius,
+          vx: blob.vx ?? 0,
+          vy: blob.vy ?? 0,
+          aimX: blob.targetX ?? blob.x ?? 0,
+          aimY: blob.targetY ?? blob.y ?? 0,
+          dashChargeRatio: 0,
+          shootChargeRatio: 0,
+          dashCooldownTicks: 0,
+          dashActiveTicks: 0,
+          stunTicks: 0,
+          slowTicks: 0,
+          shootRecoveryTicks: 0,
+          exitCombatTagTicks: 0,
+          hitFlashTicks: 0,
         }
 
         if (isLocal) {
@@ -261,14 +341,15 @@ export const createWorldAdapter = ({
     })
 
     state.pellets.forEach((p: ServerPellet, id: string) => {
+      const displayMass = (p.mass ?? 1) / massScale
       pellets.push({
         id,
         x: p.x,
         y: p.y,
         radius: p.radius,
         color: `hsl(${p.color * 40}, 80%, 60%)`,
-        mass: p.mass ?? 1,
-        usdValue: massToUsd(p.mass ?? 1, state.massPerEth ?? 100, ethUsd),
+        mass: displayMass,
+        usdValue: massToUsd(displayMass, state.massPerEth ?? 100, ethUsd),
       })
     })
 
@@ -290,6 +371,9 @@ export const createWorldAdapter = ({
     let spawnMass = 0
     let exitHoldProgress = 0
     let localUsdWorth = 0
+    let localEthWorth = 0
+    let pnlPct = 0
+    let pnlUsd = 0
 
     if (localPlayer) {
       let totalMass = 0
@@ -307,9 +391,14 @@ export const createWorldAdapter = ({
         cameraY = sumY / totalMass
       }
 
-      currentMass = (localPlayer as ServerPlayer).currentMass
-      spawnMass = (localPlayer as ServerPlayer).spawnMass
+      currentMass = (localPlayer as ServerPlayer).currentMass / massScale
+      spawnMass = (localPlayer as ServerPlayer).spawnMass / massScale
       localUsdWorth = massToUsd(currentMass, state.massPerEth ?? 100, ethUsd)
+      localEthWorth = massToEth(currentMass, state.massPerEth ?? 100)
+      if (spawnMass > 0) {
+        pnlPct = ((currentMass - spawnMass) / spawnMass) * 100
+        pnlUsd = massToUsd(currentMass - spawnMass, state.massPerEth ?? 100, ethUsd)
+      }
 
       // Very simple zoom rule: smaller mass → zoom in, larger mass → zoom out
       const MASS_ZOOM_BASE = 0.9
@@ -333,11 +422,14 @@ export const createWorldAdapter = ({
       const displayName =
         nameBySessionId.get(player.sessionId) ??
         (player.wallet ? `${player.wallet.slice(0, 6)}...${player.wallet.slice(-4)}` : 'player')
-      const usdValue = massToUsd(player.currentMass ?? 0, state.massPerEth ?? 100, ethUsd)
+      const playerMass = (player.currentMass ?? 0) / massScale
+      const usdValue = massToUsd(playerMass, state.massPerEth ?? 100, ethUsd)
+      const ethValue = massToEth(playerMass, state.massPerEth ?? 100)
       leaderboard.push({
         sessionId: player.sessionId,
         displayName,
         usdValue,
+        ethValue,
         isLocal: sessionId != null && player.sessionId === sessionId,
       })
     })
@@ -346,25 +438,38 @@ export const createWorldAdapter = ({
     return {
       camera: { x: cameraX, y: cameraY, zoom },
       world: { width: worldWidth, height: worldHeight },
+      // Default border for legacy adapter (fallback circular border)
+      border: {
+        radius: Math.max(worldWidth, worldHeight) / 2,
+        targetRadius: Math.max(worldWidth, worldHeight) / 2,
+        velocity: 0,
+        maxRadius: Math.max(worldWidth, worldHeight) / 2,
+        minRadius: 700,
+      },
       playerBlobs,
       otherBlobs,
       pellets,
       ejectedMass,
+      bullets,
       viruses: [],
       hud: {
         currentMass,
         spawnMass,
         payoutEstimate: 0, // filled in later when economy wiring is ready
         exitHoldProgress,
+        pnlPct,
+        pnlUsd,
+        events: [],
+        transactions: [],
         localUsdWorth,
+        localEthWorth,
         leaderboard,
       },
     }
   }
 
-  // Convert current pointer position into a direction vector from the
-  // center of the screen in screen-space. This is what we send as x/y.
-  const computeDirectionFromPointer = () => {
+  // Convert current pointer position into a direction vector (legacy adapter).
+  const computeAimFromPointer = () => {
     const dx = pointerX - 0.5
     const dy = pointerY - 0.5
     let dirX = dx
@@ -377,12 +482,27 @@ export const createWorldAdapter = ({
       dirX = 0
       dirY = 0
     }
-    return { x: dirX, y: dirY }
+    return { aimX: dirX, aimY: dirY }
   }
 
   // Throttle continuous movement input so we don't spam the server.
   const MOVE_SEND_INTERVAL_MS = 30
   let lastMoveSentAt = 0
+
+  const sendCurrentInput = () => {
+    const { aimX, aimY } = computeAimFromPointer()
+    sendInput({
+      w: wHeld,
+      a: aHeld,
+      s: sHeld,
+      d: dHeld,
+      aimX,
+      aimY,
+      shoot: shootHeld,
+      dash: dashHeld,
+      exit: exitKeyHeld,
+    })
+  }
 
   const controller: WorldInputController = {
     onPointerMove: ({ x, y }) => {
@@ -392,49 +512,41 @@ export const createWorldAdapter = ({
       const now = performance.now()
       if (now - lastMoveSentAt < MOVE_SEND_INTERVAL_MS) return
       lastMoveSentAt = now
-
-      const { x: dirX, y: dirY } = computeDirectionFromPointer()
-
-      sendInput({
-        x: dirX,
-        y: dirY,
-        q: exitKeyHeld,
-        space: splitHeld,
-        w: ejectHeld,
-      })
+      sendCurrentInput()
     },
     onWheelZoom: () => {
       // No-op for the legacy full-schema adapter.
     },
+    onMoveKeyChange: (state) => {
+      if (typeof state.w === 'boolean') wHeld = state.w
+      if (typeof state.a === 'boolean') aHeld = state.a
+      if (typeof state.s === 'boolean') sHeld = state.s
+      if (typeof state.d === 'boolean') dHeld = state.d
+      sendCurrentInput()
+    },
+    onShootKeyDown: () => {
+      shootHeld = true
+      sendCurrentInput()
+    },
+    onShootKeyUp: () => {
+      shootHeld = false
+      sendCurrentInput()
+    },
+    onDashKeyDown: () => {
+      dashHeld = true
+      sendCurrentInput()
+    },
+    onDashKeyUp: () => {
+      dashHeld = false
+      sendCurrentInput()
+    },
     onExitKeyDown: () => {
       exitKeyHeld = true
-      const { x, y } = computeDirectionFromPointer()
-      sendInput({ x, y, q: true, space: splitHeld, w: ejectHeld })
+      sendCurrentInput()
     },
     onExitKeyUp: () => {
       exitKeyHeld = false
-      const { x, y } = computeDirectionFromPointer()
-      sendInput({ x, y, q: false, space: splitHeld, w: ejectHeld })
-    },
-    onSplitKeyDown: () => {
-      const { x, y } = computeDirectionFromPointer()
-      splitHeld = true
-      sendInput({ x, y, q: exitKeyHeld, space: true, w: ejectHeld })
-    },
-    onSplitKeyUp: () => {
-      const { x, y } = computeDirectionFromPointer()
-      splitHeld = false
-      sendInput({ x, y, q: exitKeyHeld, space: false, w: ejectHeld })
-    },
-    onEjectKeyDown: () => {
-      const { x, y } = computeDirectionFromPointer()
-      ejectHeld = true
-      sendInput({ x, y, q: exitKeyHeld, space: splitHeld, w: true })
-    },
-    onEjectKeyUp: () => {
-      const { x, y } = computeDirectionFromPointer()
-      ejectHeld = false
-      sendInput({ x, y, q: exitKeyHeld, space: splitHeld, w: false })
+      sendCurrentInput()
     },
   }
 
@@ -454,29 +566,67 @@ type DeltaWorldSnapshot = {
   tick: number
   nodes: Map<number, unknown>
   ownedIds: number[]
+  // Dynamic border state (POC parity)
+  border?: {
+    radius: number
+    targetRadius: number
+    velocity: number
+  }
 }
 
 type ServerColor = { r: number; g: number; b: number }
 
 type ServerNodeDto = {
   id: number
-  kind: 'player' | 'food' | 'ejected' | 'virus'
+  kind: 'player' | 'bullet' | 'pellet' | 'spill' | 'obstacle' | 'spillCluster'
   x: number
   y: number
   radius?: number
   mass?: number
+  spawnMass?: number
   color?: ServerColor
   ownerSessionId?: string
   displayName?: string
+  flags?: number
+  exitProgress?: number
+  attackerSessionId?: string
+  victimSessionId?: string
+  unlockTick?: number
+  count?: number
+  vx?: number
+  vy?: number
+  aimX?: number
+  aimY?: number
+  dashChargeRatio?: number
+  shootChargeRatio?: number
+  dashCooldownTicks?: number
+  dashActiveTicks?: number
+  stunTicks?: number
+  slowTicks?: number
+  shootRecoveryTicks?: number
+  exitCombatTagTicks?: number
+  hitFlashTicks?: number
 }
 
 type WorldInitDto = {
+  protocolVersion?: number
   serverId: string
   tickMs: number
   world: { left: number; right: number; top: number; bottom: number }
+  // Dynamic circular border (POC parity)
+  border?: {
+    radius: number
+    targetRadius: number
+    maxRadius: number
+    minRadius: number
+  }
   massPerEth: number
   exitHoldMs: number
+  massScale?: number
 }
+
+type HudEvent = { id: number; message: string; variant: 'exit' | 'warn' | 'danger' }
+type HudTransaction = { id: number; amount: number; type: 'gain' | 'loss' }
 
 function isDeltaSnapshot(state: unknown): state is DeltaWorldSnapshot {
   if (!state || typeof state !== 'object') return false
@@ -529,19 +679,40 @@ export const createDeltaWorldAdapter = ({
   let pointerX = 0.5
   let pointerY = 0.5
   let exitKeyHeld = false
-  let exitHoldStartedAt: number | null = null
-  let splitHeld = false
-  let ejectHeld = false
+  let shootHeld = false
+  let dashHeld = false
+  let wHeld = false
+  let aHeld = false
+  let sHeld = false
+  let dHeld = false
 
-  // Ogar-style wheel zoom factor (>= 1)
-  let wheelZoom = 1
+  let lastHudTick = -1
+  let prevLocalMassRaw = 0
+  let prevExitProgress = 0
+  let prevStunTicks = 0
+  let prevSlowTicks = 0
+  let prevExitCombatTagTicks = 0
+  let nextEventId = 1
+  let nextTxId = 1
+  const events: HudEvent[] = []
+  const transactions: HudTransaction[] = []
 
-  // Smoothed camera state (Ogar3 client style)
+  // POC-style camera constants (diep.io-ish)
+  const POC_ZOOM_BASE = 1.4
+  const POC_ZOOM_MIN = 0.8
+  const POC_SPEED_ZOOM_REF = 15
+  const POC_CAM_LOOKAHEAD = 60
+  const POC_CAM_LERP = 0.15
+  const POC_ZOOM_LERP = 0.05
+
+  // Smoothed camera state (POC style)
   let cameraX = 0
   let cameraY = 0
   let cameraZoom = 1
   let hasCameraInit = false
   let hasPlayerView = false
+
+  const FLAG_EXITING = 1 << 2
 
   type InterpState = {
     ox: number
@@ -613,52 +784,47 @@ export const createDeltaWorldAdapter = ({
     if (!hasCameraInit) {
       cameraX = (init.world.left + init.world.right) / 2
       cameraY = (init.world.top + init.world.bottom) / 2
-      cameraZoom = 1
+      cameraZoom = POC_ZOOM_BASE
       hasCameraInit = true
     }
 
-    let totalSize = 0
-    let sumX = 0
-    let sumY = 0
-    let count = 0
-
-    for (const id of snap.ownedIds) {
-      const raw = snap.nodes.get(id) as ServerNodeDto | undefined
-      if (!raw || raw.kind !== 'player') continue
-      const it = getInterpolated(id, raw, now)
-      totalSize += it.radius
-      sumX += it.x
-      sumY += it.y
-      count++
-    }
-
-    if (count <= 0) {
+    const localId = snap.ownedIds[0]
+    if (localId == null) {
       hasPlayerView = false
       return { x: cameraX, y: cameraY, zoom: cameraZoom }
     }
 
-    const targetX = Math.trunc(sumX / count)
-    const targetY = Math.trunc(sumY / count)
+    const raw = snap.nodes.get(localId) as ServerNodeDto | undefined
+    if (!raw || raw.kind !== 'player') {
+      hasPlayerView = false
+      return { x: cameraX, y: cameraY, zoom: cameraZoom }
+    }
 
-    const sizeForZoom = Math.max(1, totalSize)
-    const factor = Math.pow(Math.min(64.0 / sizeForZoom, 1), 0.4)
+    const it = getInterpolated(localId, raw, now)
 
-    const width = window.innerWidth
-    const height = window.innerHeight
-    const ratio = Math.max(height / 1080, width / 1920)
-    const targetZoom = factor * ratio * wheelZoom
+    // Use server-replicated aim point for look-ahead.
+    const aimX = raw.aimX ?? it.x
+    const aimY = raw.aimY ?? it.y
+    const aimAngle = Math.atan2(aimY - it.y, aimX - it.x)
+
+    const targetX = it.x + Math.cos(aimAngle) * POC_CAM_LOOKAHEAD
+    const targetY = it.y + Math.sin(aimAngle) * POC_CAM_LOOKAHEAD
+
+    const speed = Math.hypot(raw.vx ?? 0, raw.vy ?? 0)
+    const speedRatio = Math.min(1, speed / POC_SPEED_ZOOM_REF)
+    const targetZoom = POC_ZOOM_BASE - speedRatio * (POC_ZOOM_BASE - POC_ZOOM_MIN)
 
     if (!hasPlayerView) {
-      cameraX = targetX
-      cameraY = targetY
+      cameraX = Math.trunc(targetX)
+      cameraY = Math.trunc(targetY)
       cameraZoom = targetZoom
       hasPlayerView = true
       return { x: cameraX, y: cameraY, zoom: cameraZoom }
     }
 
-    cameraZoom = (9 * cameraZoom + targetZoom) / 10
-    cameraX = (cameraX + targetX) / 2
-    cameraY = (cameraY + targetY) / 2
+    cameraZoom += (targetZoom - cameraZoom) * POC_ZOOM_LERP
+    cameraX += (targetX - cameraX) * POC_CAM_LERP
+    cameraY += (targetY - cameraY) * POC_CAM_LERP
 
     return { x: cameraX, y: cameraY, zoom: cameraZoom }
   }
@@ -673,12 +839,15 @@ export const createDeltaWorldAdapter = ({
     syncInterpolation(snap, now)
 
     const init = snap.init as WorldInitDto
+    if (init.protocolVersion && init.protocolVersion !== PROTOCOL_VERSION) {
+      return { x: 0, y: 0 }
+    }
     // IMPORTANT: Do not advance camera smoothing from the input path.
     // Camera smoothing is advanced from getViewModel() (render loop) only.
     if (!hasCameraInit) {
       cameraX = (init.world.left + init.world.right) / 2
       cameraY = (init.world.top + init.world.bottom) / 2
-      cameraZoom = 1
+      cameraZoom = POC_ZOOM_BASE
       hasCameraInit = true
     }
     const view = { x: cameraX, y: cameraY, zoom: cameraZoom }
@@ -697,10 +866,24 @@ export const createDeltaWorldAdapter = ({
   const MOVE_SEND_INTERVAL_MS = 30
   let lastMoveSentAt = 0
 
+  const sendCurrentInput = (mouse: { x: number; y: number }) => {
+    sendInput({
+      w: wHeld,
+      a: aHeld,
+      s: sHeld,
+      d: dHeld,
+      aimX: mouse.x,
+      aimY: mouse.y,
+      shoot: shootHeld,
+      dash: dashHeld,
+      exit: exitKeyHeld,
+    })
+  }
+
   const maybeSendMove = (now: number, mouse: { x: number; y: number }) => {
     if (now - lastMoveSentAt < MOVE_SEND_INTERVAL_MS) return
     lastMoveSentAt = now
-    sendInput({ x: mouse.x, y: mouse.y, q: exitKeyHeld, space: splitHeld, w: ejectHeld })
+    sendCurrentInput(mouse)
   }
 
   const controller: WorldInputController = {
@@ -713,43 +896,46 @@ export const createDeltaWorldAdapter = ({
       maybeSendMove(now, m)
     },
     onWheelZoom: ({ deltaY }) => {
-      // Ogar wheel zoom: zoom *= 0.9^(wheelDelta / -120)
-      wheelZoom *= Math.pow(0.9, deltaY / 120)
-      wheelZoom = Math.max(1, wheelZoom)
-      const max = cameraZoom > 0 ? 4 / cameraZoom : 4
-      wheelZoom = Math.min(wheelZoom, max)
+      // POC parity: wheel zoom disabled.
+      void deltaY
+    },
+    onMoveKeyChange: (state) => {
+      if (typeof state.w === 'boolean') wHeld = state.w
+      if (typeof state.a === 'boolean') aHeld = state.a
+      if (typeof state.s === 'boolean') sHeld = state.s
+      if (typeof state.d === 'boolean') dHeld = state.d
+      const m = computeMouseWorld()
+      sendCurrentInput(m)
+    },
+    onShootKeyDown: () => {
+      shootHeld = true
+      const m = computeMouseWorld()
+      sendCurrentInput(m)
+    },
+    onShootKeyUp: () => {
+      shootHeld = false
+      const m = computeMouseWorld()
+      sendCurrentInput(m)
+    },
+    onDashKeyDown: () => {
+      dashHeld = true
+      const m = computeMouseWorld()
+      sendCurrentInput(m)
+    },
+    onDashKeyUp: () => {
+      dashHeld = false
+      const m = computeMouseWorld()
+      sendCurrentInput(m)
     },
     onExitKeyDown: () => {
       exitKeyHeld = true
-      if (!exitHoldStartedAt) exitHoldStartedAt = performance.now()
       const m = computeMouseWorld()
-      sendInput({ x: m.x, y: m.y, q: true, space: splitHeld, w: ejectHeld })
+      sendCurrentInput(m)
     },
     onExitKeyUp: () => {
       exitKeyHeld = false
-      exitHoldStartedAt = null
       const m = computeMouseWorld()
-      sendInput({ x: m.x, y: m.y, q: false, space: splitHeld, w: ejectHeld })
-    },
-    onSplitKeyDown: () => {
-      splitHeld = true
-      const m = computeMouseWorld()
-      sendInput({ x: m.x, y: m.y, q: exitKeyHeld, space: splitHeld, w: ejectHeld })
-    },
-    onSplitKeyUp: () => {
-      splitHeld = false
-      const m = computeMouseWorld()
-      sendInput({ x: m.x, y: m.y, q: exitKeyHeld, space: splitHeld, w: ejectHeld })
-    },
-    onEjectKeyDown: () => {
-      ejectHeld = true
-      const m = computeMouseWorld()
-      sendInput({ x: m.x, y: m.y, q: exitKeyHeld, space: splitHeld, w: ejectHeld })
-    },
-    onEjectKeyUp: () => {
-      ejectHeld = false
-      const m = computeMouseWorld()
-      sendInput({ x: m.x, y: m.y, q: exitKeyHeld, space: splitHeld, w: ejectHeld })
+      sendCurrentInput(m)
     },
   }
 
@@ -761,6 +947,8 @@ export const createDeltaWorldAdapter = ({
     syncInterpolation(snap, now)
 
     const init = snap.init as WorldInitDto
+    if (init.protocolVersion && init.protocolVersion !== PROTOCOL_VERSION) return null
+    const massScale = init.massScale ?? MASS_SCALE
     const worldWidth = init.world.right - init.world.left
     const worldHeight = init.world.bottom - init.world.top
     const massPerEth = init.massPerEth ?? 100
@@ -789,20 +977,21 @@ export const createDeltaWorldAdapter = ({
     const otherBlobs: BlobView[] = []
     const pellets: PelletView[] = []
     const ejectedMass: EjectedMassView[] = []
+    const bullets: BulletView[] = []
     const viruses: VirusView[] = []
+    let localNode: ServerNodeDto | null = null
+    let localSpawnMassRaw = 0
 
-    let currentMass = 0
+    let currentMassRaw = 0
     for (const id of snap.ownedIds) {
       const node = snap.nodes.get(id) as ServerNodeDto | undefined
       if (!node || node.kind !== 'player') continue
-      currentMass += node.mass ?? 0
+      currentMassRaw += node.mass ?? 0
     }
+    const currentMass = currentMassRaw / massScale
 
-    // Exit progress purely client-side (overlay)
+    // Exit progress from server (authoritative)
     let exitHoldProgress = 0
-    if (exitKeyHeld && exitHoldStartedAt != null && init.exitHoldMs > 0) {
-      exitHoldProgress = Math.min(1, (now - exitHoldStartedAt) / init.exitHoldMs)
-    }
 
     for (const [id, n] of snap.nodes.entries()) {
       const node = n as ServerNodeDto
@@ -816,9 +1005,18 @@ export const createDeltaWorldAdapter = ({
               ? node.ownerSessionId
               : 'player')
         const color = node.color ? rgbToHslString(node.color) : `hsl(200, 80%, 60%)`
-        const mass = node.mass ?? 0
+        const mass = (node.mass ?? 0) / massScale
         const radius = it.radius
         const usdValue = massToUsd(mass, massPerEth, ethUsd)
+        const isExiting = ((node.flags ?? 0) & FLAG_EXITING) !== 0
+        const exitProgress = node.exitProgress ?? 0
+        if (isLocal) {
+          localNode = node
+          if (typeof node.spawnMass === 'number') {
+            localSpawnMassRaw = node.spawnMass
+          }
+          exitHoldProgress = Math.max(exitHoldProgress, exitProgress)
+        }
         const viewBlob: BlobView = {
           id: String(node.id),
           x: it.x,
@@ -829,18 +1027,31 @@ export const createDeltaWorldAdapter = ({
           displayName,
           usdValue,
           isLocal,
-          isExiting: false,
-          exitProgress: 0,
-          exitRadius: radius,
+          isExiting,
+          exitProgress,
+          exitRadius: isExiting ? radius * (1 - exitProgress) : radius,
+          vx: node.vx ?? 0,
+          vy: node.vy ?? 0,
+          aimX: node.aimX ?? it.x,
+          aimY: node.aimY ?? it.y,
+          dashChargeRatio: node.dashChargeRatio ?? 0,
+          shootChargeRatio: node.shootChargeRatio ?? 0,
+          dashCooldownTicks: node.dashCooldownTicks ?? 0,
+          dashActiveTicks: node.dashActiveTicks ?? 0,
+          stunTicks: node.stunTicks ?? 0,
+          slowTicks: node.slowTicks ?? 0,
+          shootRecoveryTicks: node.shootRecoveryTicks ?? 0,
+          exitCombatTagTicks: node.exitCombatTagTicks ?? 0,
+          hitFlashTicks: node.hitFlashTicks ?? 0,
         }
         if (isLocal) playerBlobs.push(viewBlob)
         else otherBlobs.push(viewBlob)
         continue
       }
 
-      if (node.kind === 'food') {
+      if (node.kind === 'pellet') {
         const it = getInterpolated(id, node, now)
-        const mass = node.mass ?? 1
+        const mass = (node.mass ?? 1) / massScale
         const radius = it.radius
         const color = node.color ? rgbToHslString(node.color, 90) : 'hsl(90, 70%, 55%)'
         pellets.push({
@@ -851,26 +1062,70 @@ export const createDeltaWorldAdapter = ({
           color,
           mass,
           usdValue: massToUsd(mass, massPerEth, ethUsd),
+          locked: false,
+          unlockPop: 0,
         })
         continue
       }
 
-      if (node.kind === 'ejected') {
+      if (node.kind === 'spill') {
         const it = getInterpolated(id, node, now)
-        const color = node.color ? rgbToHslString(node.color, 200) : 'hsl(200, 70%, 55%)'
-        ejectedMass.push({ id: String(node.id), x: it.x, y: it.y, radius: it.radius, color })
+        const mass = (node.mass ?? 1) / massScale
+        const radius = it.radius
+        const color = node.color ? rgbToHslString(node.color, 40) : 'hsl(40, 80%, 55%)'
+        const unlockTick = node.unlockTick ?? 0
+        const isLocked = sessionId != null && node.victimSessionId === sessionId && snap.tick < unlockTick
+        const unlockPop =
+          unlockTick > 0 && snap.tick >= unlockTick && snap.tick - unlockTick < 8
+            ? 1 - (snap.tick - unlockTick) / 8
+            : 0
+        pellets.push({
+          id: String(node.id),
+          x: it.x,
+          y: it.y,
+          radius,
+          color,
+          mass,
+          usdValue: massToUsd(mass, massPerEth, ethUsd),
+          locked: isLocked,
+          unlockPop,
+        })
         continue
       }
 
-      // virus
-      const it = getInterpolated(id, node, now)
-      viruses.push({
-        id: String(node.id),
-        x: it.x,
-        y: it.y,
-        radius: it.radius,
-        color: 'hsl(120, 70%, 40%)',
-      })
+      if (node.kind === 'bullet') {
+        const it = getInterpolated(id, node, now)
+        bullets.push({ id: String(node.id), x: it.x, y: it.y, radius: it.radius })
+        continue
+      }
+
+      if (node.kind === 'obstacle') {
+        const it = getInterpolated(id, node, now)
+        viruses.push({
+          id: String(node.id),
+          x: it.x,
+          y: it.y,
+          radius: it.radius,
+          color: 'hsl(210, 5%, 45%)',
+        })
+        continue
+      }
+
+      // spillCluster (LOD-only)
+      if (node.kind === 'spillCluster') {
+        const it = getInterpolated(id, node, now)
+        pellets.push({
+          id: String(node.id),
+          x: it.x,
+          y: it.y,
+          radius: it.radius,
+          color: 'hsl(40, 20%, 40%)',
+          mass: (node.mass ?? 1) / massScale,
+          usdValue: Number.NaN,
+          locked: false,
+          unlockPop: 0,
+        })
+      }
     }
 
     // Leaderboard (sorted by USD) aggregated by owner.
@@ -893,29 +1148,114 @@ export const createDeltaWorldAdapter = ({
 
     const leaderboard: WorldViewModel['hud']['leaderboard'] = []
     for (const p of leaderboardByOwner.values()) {
+      const displayMass = p.totalMass / massScale
       leaderboard.push({
         sessionId: p.sessionId,
         displayName: p.displayName,
-        usdValue: massToUsd(p.totalMass, massPerEth, ethUsd),
+        usdValue: massToUsd(displayMass, massPerEth, ethUsd),
+        ethValue: massToEth(displayMass, massPerEth),
         isLocal: sessionId != null && p.sessionId === sessionId,
       })
     }
     leaderboard.sort((a, b) => b.usdValue - a.usdValue)
 
+    const spawnMass = localSpawnMassRaw > 0 ? localSpawnMassRaw / massScale : 0
+    const pnlMass = currentMass - spawnMass
+    const pnlUsd = spawnMass > 0 ? massToUsd(pnlMass, massPerEth, ethUsd) : 0
+    const pnlPct = spawnMass > 0 ? (pnlMass / spawnMass) * 100 : 0
+
+    if (snap.tick !== lastHudTick && localNode) {
+      lastHudTick = snap.tick
+
+      // Transactions (mass delta)
+      const delta = currentMassRaw - prevLocalMassRaw
+      if (delta !== 0) {
+        const amountMass = Math.abs(delta) / massScale
+        const amountUsd = massToUsd(amountMass, massPerEth, ethUsd)
+        transactions.unshift({ id: nextTxId++, amount: amountUsd, type: delta > 0 ? 'gain' : 'loss' })
+        if (transactions.length > 5) transactions.length = 5
+      }
+
+      const exitProgress = localNode.exitProgress ?? 0
+      if (exitProgress > 0 && prevExitProgress === 0) {
+        events.unshift({
+          id: nextEventId++,
+          message: `CASHING OUT ${formatUsd(localUsdWorth, true)}`,
+          variant: 'exit',
+        })
+      } else if (exitProgress === 0 && prevExitProgress > 0) {
+        events.unshift({ id: nextEventId++, message: 'CASHOUT CANCELLED', variant: 'danger' })
+      }
+
+      if ((localNode.stunTicks ?? 0) > 0 && prevStunTicks === 0) {
+        events.unshift({ id: nextEventId++, message: 'STUNNED', variant: 'warn' })
+      }
+
+      if ((localNode.slowTicks ?? 0) > 0 && prevSlowTicks === 0) {
+        events.unshift({ id: nextEventId++, message: 'SLOWED', variant: 'warn' })
+      }
+
+      if ((localNode.exitCombatTagTicks ?? 0) > 0 && prevExitCombatTagTicks === 0) {
+        events.unshift({ id: nextEventId++, message: 'IN COMBAT', variant: 'danger' })
+      }
+
+      if (events.length > 6) events.length = 6
+
+      prevLocalMassRaw = currentMassRaw
+      prevExitProgress = exitProgress
+      prevStunTicks = localNode.stunTicks ?? 0
+      prevSlowTicks = localNode.slowTicks ?? 0
+      prevExitCombatTagTicks = localNode.exitCombatTagTicks ?? 0
+    } else if (snap.tick !== lastHudTick && !localNode) {
+      lastHudTick = snap.tick
+      prevLocalMassRaw = currentMassRaw
+      prevExitProgress = 0
+      prevStunTicks = 0
+      prevSlowTicks = 0
+      prevExitCombatTagTicks = 0
+    }
+
+    // Build border state from init + delta
+    const borderRadius = snap.border?.radius ?? init.border?.radius ?? init.border?.minRadius ?? 700
+    const borderTargetRadius = snap.border?.targetRadius ?? init.border?.targetRadius ?? borderRadius
+    const borderVelocity = snap.border?.velocity ?? 0
+    const borderMaxRadius = init.border?.maxRadius ?? 11314
+    const borderMinRadius = init.border?.minRadius ?? 700
+
     return {
       camera: { x: cameraX, y: cameraY, zoom },
       world: { width: worldWidth, height: worldHeight },
+      // Dynamic circular border (POC parity)
+      border: {
+        radius: borderRadius,
+        targetRadius: borderTargetRadius,
+        velocity: borderVelocity,
+        maxRadius: borderMaxRadius,
+        minRadius: borderMinRadius,
+      },
       playerBlobs,
       otherBlobs,
       pellets,
       ejectedMass,
+      bullets,
       viruses,
       hud: {
         currentMass,
-        spawnMass: 0,
+        spawnMass,
         payoutEstimate: 0,
         exitHoldProgress,
+        dashCooldownTicks: localNode?.dashCooldownTicks ?? 0,
+        shootChargeRatio: localNode?.shootChargeRatio ?? 0,
+        shootRecoveryTicks: localNode?.shootRecoveryTicks ?? 0,
+        stunTicks: localNode?.stunTicks ?? 0,
+        slowTicks: localNode?.slowTicks ?? 0,
+        exitCombatTagTicks: localNode?.exitCombatTagTicks ?? 0,
+        pnlPct,
+        pnlUsd,
+        events,
+        transactions,
         localUsdWorth: massToUsd(currentMass, massPerEth, ethUsd),
+        localEthWorth: massToEth(currentMass, massPerEth),
         leaderboard,
       },
     }

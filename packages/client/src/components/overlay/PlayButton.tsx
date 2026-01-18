@@ -206,6 +206,36 @@ export const PlayButton = ({ servers, displayName }: PlayButtonProps) => {
 
         // Refresh balance after deposit
         await refreshBalance()
+
+        // Wait for indexer to process the deposit into the ledger
+        // Poll eligibility until balance appears (max 15 seconds)
+        console.log('[PlayButton] Waiting for indexer to process deposit...')
+        const maxWaitMs = 15000
+        const pollIntervalMs = 1000
+        const startTime = Date.now()
+        let indexerReady = false
+
+        while (Date.now() - startTime < maxWaitMs) {
+          await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
+          const recheckEligibility = await checkEligibility(selectedServer.serverId, accessToken)
+          console.log('[PlayButton] Recheck eligibility:', recheckEligibility)
+          
+          if (recheckEligibility.canJoin && recheckEligibility.action !== 'deposit_required') {
+            indexerReady = true
+            // If the recheck shows we have a depositId, use it
+            if (recheckEligibility.depositId) {
+              depositId = recheckEligibility.depositId
+            }
+            break
+          }
+        }
+
+        if (!indexerReady) {
+          console.error('[PlayButton] Indexer did not process deposit in time')
+          setErrorMessage('Deposit is being processed. Please try again in a few seconds.')
+          setPlayPhase('idle')
+          return
+        }
       }
 
       // Step 6: Join the game
@@ -278,9 +308,12 @@ export const PlayButton = ({ servers, displayName }: PlayButtonProps) => {
             <Globe className="w-4 h-4 text-gray-500" />
             <span className="text-white">{selectedServer?.name ?? 'No servers'}</span>
             {selectedServer ? (
-              <span className="text-[#4ade80] font-bold text-glow-green-subtle">
-                {formatUsd(buyInUsd, true)}
-              </span>
+              <div className="flex flex-col leading-tight">
+                <span className="text-[#4ade80] font-bold text-glow-green-subtle">
+                  {formatUsd(buyInUsd, true)}
+                </span>
+                <span className="text-[10px] text-gray-500">{formatEth(buyInEth)}</span>
+              </div>
             ) : null}
           </div>
           <div className="flex items-center gap-2.5">
@@ -315,7 +348,10 @@ export const PlayButton = ({ servers, displayName }: PlayButtonProps) => {
                         <span className="font-semibold text-white">{server.name}</span>
                       </div>
                       <div className="flex items-center gap-3">
-                        <span className="font-bold text-[#4ade80]">{formatUsd(ethToUsd(server.buyInEth, ethUsd), true)}</span>
+                        <div className="flex flex-col items-end leading-tight">
+                          <span className="font-bold text-[#4ade80]">{formatUsd(ethToUsd(server.buyInEth, ethUsd), true)}</span>
+                          <span className="text-[10px] text-gray-500">{formatEth(server.buyInEth)}</span>
+                        </div>
                         <span className="text-xs text-gray-600 flex items-center gap-1">
                           <Wifi className="w-3 h-3" />
                           {server.pingMs != null ? `${Math.round(server.pingMs)}ms` : '--'}
@@ -332,11 +368,14 @@ export const PlayButton = ({ servers, displayName }: PlayButtonProps) => {
 
       {selectedServer ? (
         <div className="flex items-center justify-center gap-4 sm:gap-5 mb-5 text-[13px]">
-          <div className="flex items-center gap-1.5">
-            <span className="font-extrabold text-base text-[#4ade80] text-glow-green-subtle">
-              {formatUsd(buyInUsd, true)}
-            </span>
-            <span className="text-gray-500 font-medium">entry</span>
+          <div className="flex flex-col items-center">
+            <div className="flex items-center gap-1.5">
+              <span className="font-extrabold text-base text-[#4ade80] text-glow-green-subtle">
+                {formatUsd(buyInUsd, true)}
+              </span>
+              <span className="text-gray-500 font-medium">entry</span>
+            </div>
+            <span className="text-[10px] text-gray-500">{formatEth(buyInEth)}</span>
           </div>
           <span className="w-1 h-1 rounded-full bg-gray-700"></span>
           <div className="flex items-center gap-1.5">
@@ -344,11 +383,14 @@ export const PlayButton = ({ servers, displayName }: PlayButtonProps) => {
             <span className="text-gray-500 font-medium">playing</span>
           </div>
           <span className="w-1 h-1 rounded-full bg-gray-700"></span>
-          <div className="flex items-center gap-1.5">
-            <span className="font-extrabold text-base text-[#4ade80] text-glow-green-subtle">
-              {formatUsd(potUsd, true)}
-            </span>
-            <span className="text-gray-500 font-medium">pot</span>
+          <div className="flex flex-col items-center">
+            <div className="flex items-center gap-1.5">
+              <span className="font-extrabold text-base text-[#4ade80] text-glow-green-subtle">
+                {formatUsd(potUsd, true)}
+              </span>
+              <span className="text-gray-500 font-medium">pot</span>
+            </div>
+            <span className="text-[10px] text-gray-500">{formatEth(selectedServer.totalWorldEth ?? 0)}</span>
           </div>
         </div>
       ) : null}

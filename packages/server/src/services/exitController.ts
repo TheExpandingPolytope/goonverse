@@ -31,38 +31,42 @@ export function generateSessionId(
   );
 }
 
+const MASS_SCALE = 10_000;
+
 /**
- * Convert mass to payout amount
- * 
- * @param mass - Player's final mass
- * @param massPerEth - Mass per ETH rate from server config
+ * Convert mass to payout amount (fixed-point, floor).
+ *
+ * @param mass - Player's final mass (scaled by MASS_SCALE)
+ * @param massPerEth - Display mass per ETH rate from server config
  * @param decimals - Asset token decimals (default: 18 for ETH/wei)
  * @returns Payout in asset tokens
  */
 export function massToPayoutAmount(
   mass: number,
   massPerEth: number,
-  decimals: number = 18
+  decimals: number = 18,
 ): bigint {
-  // payout = mass / massPerEth * 10^decimals
-  const payoutUsd = mass / massPerEth;
-  return BigInt(Math.floor(payoutUsd * 10 ** decimals));
+  if (!Number.isFinite(massPerEth) || massPerEth <= 0) return 0n;
+  const denom = BigInt(Math.floor(massPerEth)) * BigInt(MASS_SCALE);
+  const numerator = BigInt(Math.max(0, Math.floor(mass))) * 10n ** BigInt(decimals);
+  return numerator / denom;
 }
 
 /**
- * Convert payout amount to mass
- * 
+ * Convert payout amount to mass (fixed-point, floor).
+ *
  * @param payout - Payout in asset tokens
- * @param massPerEth - Mass per ETH rate from server config
+ * @param massPerEth - Display mass per ETH rate from server config
  * @param decimals - Asset token decimals (default: 18 for ETH/wei)
- * @returns Equivalent mass
+ * @returns Equivalent mass (scaled by MASS_SCALE)
  */
 export function payoutAmountToMass(
   payout: bigint,
   massPerEth: number,
-  decimals: number = 18
+  decimals: number = 18,
 ): number {
-  // mass = payout / 10^decimals * massPerEth
-  const payoutUsd = Number(payout) / 10 ** decimals;
-  return payoutUsd * massPerEth;
+  if (!Number.isFinite(massPerEth) || massPerEth <= 0) return 0;
+  const numer = payout * BigInt(Math.floor(massPerEth)) * BigInt(MASS_SCALE);
+  const denom = 10n ** BigInt(decimals);
+  return Number(numer / denom);
 }

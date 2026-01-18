@@ -1,9 +1,6 @@
 import { Room, Client } from "colyseus";
-import { 
-  GameState, 
-  type InputMessage, 
-  type SpawnOptions 
-} from "./schema/GameState.js";
+import { GameState, type SpawnOptions } from "./schema/GameState.js";
+import { PROTOCOL_VERSION, type InputMessage, type WorldDeltaDto, type WorldInitDto, type NodeDto } from "./protocol.js";
 import { verifyPrivyToken, getPrivyUser, getPrimaryWallet, type PrivyClaims } from "../auth/privy.js";
 import { getServer, serverIdToBytes32 } from "../services/ponder.js";
 import {
@@ -16,11 +13,10 @@ import { config } from "../config.js";
 import type { PlayerUserData, AuthContext } from "../types.js";
 import type { SerializedExitTicket } from "@goonverse/accounts";
 
-// FFA parity simulation engine
-import { FFA_CONFIG } from "./sim/config.js";
-import { massToRadius } from "./sim/math.js";
-import { FfaEngine } from "./sim/engine.js";
-import type { PlayerSim, WorldNode } from "./sim/types.js";
+// Shooter simulation engine
+import { SIM_CONFIG } from "./sim/config.js";
+import { GameEngine, type WorldNode } from "./sim/engine.js";
+import type { PlayerState } from "./sim/state.js";
 
 /**
  * Main game room
@@ -34,29 +30,27 @@ import type { PlayerSim, WorldNode } from "./sim/types.js";
  * Room metadata is automatically included in matchMaker.query() results
  * when using RedisDriver for cross-machine room discovery.
  */
+// Default buy-in for development when Ponder isn't available (0.01 ETH in wei)
+const DEV_DEFAULT_BUY_IN_WEI = "10000000000000000"; // 0.01 ETH
+
 export class GameRoom extends Room<GameState> {
-  // NOTE: For testing/dev we keep exits fast. In production this can be overridden
-  // by the indexed server config (and should be longer for safety/UX).
-  private exitHoldMs: number = config.nodeEnv === "production" ? 3000 : 600;
+  private exitHoldMs: number = SIM_CONFIG.exit.durationTicks * SIM_CONFIG.tickMs;
   private massPerEth: number = 100;
   private sessionNonce: number = 0;
-  private buyInAmount: string = "0";
+  private buyInAmount: string = DEV_DEFAULT_BUY_IN_WEI;
   private rakeShareBps: number = 0;
   private worldShareBps: number = 0;
   private startedAt: number = Date.now();
 
-  // Authoritative simulation (FFA parity)
-  private readonly engine = new FfaEngine();
+  // Authoritative simulation (shooter)
+  private readonly engine = new GameEngine();
   private tickCount: number = 0;
-  private spawnTickCount: number = 0;
-  private spawnTaskInFlight: boolean = false;
 
   // Best-parity visibility: per-client visible sets + deltas
   private readonly prevVisibleIdsBySession = new Map<string, Set<number>>();
 
-  // Input edge detection + exit-hold overlay
-  private readonly prevKeyStateBySession = new Map<string, { space: boolean; w: boolean; q: boolean }>();
-  private readonly exitHoldStartedAtBySession = new Map<string, number>();
+  // Input tracking (stale input handling)
+  private readonly lastInputTickBySession = new Map<string, number>();
 
   // Cached balances for metadata
   private cachedPelletReserveWei: bigint = 0n;
@@ -114,11 +108,13 @@ export class GameRoom extends Room<GameState> {
     // Initialize state
     this.setState(new GameState());
     this.state.serverId = config.serverId;
-    this.state.tickRate = Math.round(1000 / FFA_CONFIG.tickMs);
-    this.state.worldWidth = FFA_CONFIG.borderRight - FFA_CONFIG.borderLeft;
-    this.state.worldHeight = FFA_CONFIG.borderBottom - FFA_CONFIG.borderTop;
+    this.state.tickRate = Math.round(1000 / SIM_CONFIG.tickMs);
+    // POC parity: World size derived from max border radius (circular world)
+    this.state.worldWidth = SIM_CONFIG.border.worldRadiusMax * 2;
+    this.state.worldHeight = SIM_CONFIG.border.worldRadiusMax * 2;
+    this.state.massScale = SIM_CONFIG.massScale;
 
-    // Load server config from indexer
+    // Load server config from indexer (falls back to development defaults if unavailable)
     const serverConfig = await getServer(config.serverId);
     if (serverConfig) {
       this.exitHoldMs = serverConfig.exitHoldMs;
@@ -128,6 +124,9 @@ export class GameRoom extends Room<GameState> {
       this.worldShareBps = serverConfig.worldShareBps ?? 0;
       this.state.exitHoldMs = serverConfig.exitHoldMs;
       this.state.massPerEth = serverConfig.massPerEth;
+      console.log(`[GameRoom] Loaded config from indexer: buyIn=${this.buyInAmount} massPerEth=${this.massPerEth}`);
+    } else {
+      console.warn(`[GameRoom] Ponder unavailable - using development defaults (buyIn=${this.buyInAmount})`);
     }
 
     // Precompute spawn cost in wei (net after rake/world shares). This must match indexer deposit credits.
@@ -140,16 +139,18 @@ export class GameRoom extends Room<GameState> {
       this.spawnCostWei = 0n;
     }
 
-    // TEMP (testing): make exiting faster in dev.
-    if (config.nodeEnv !== "production") {
-      this.exitHoldMs = 600;
-      this.state.exitHoldMs = this.exitHoldMs;
-    } else if (!this.state.exitHoldMs) {
+    if (!this.state.exitHoldMs) {
       // Ensure state matches the active hold duration even if serverConfig is missing.
       this.state.exitHoldMs = this.exitHoldMs;
     }
 
+    // Seed RNG deterministically from roomId
+    this.engine.seedRng(this.hashSeed(this.roomId));
+
     await this.refreshBalancesAndMetadata();
+
+    // Seed static obstacles
+    this.engine.initializeObstacles(SIM_CONFIG.obstacles.count);
 
     // Register message handlers
     this.onMessage("input", (client, message: InputMessage) => {
@@ -162,7 +163,7 @@ export class GameRoom extends Room<GameState> {
     // Set up game loop
     this.setSimulationInterval((deltaTime) => {
       this.update(deltaTime);
-    }, FFA_CONFIG.tickMs);
+    }, SIM_CONFIG.tickMs);
   }
 
   /**
@@ -196,7 +197,8 @@ export class GameRoom extends Room<GameState> {
       console.log(`Reconnecting wallet ${wallet} from ${oldSessionId} to ${client.sessionId}`);
 
       this.engine.rekeyPlayerSession(oldSessionId, client.sessionId);
-      existing.disconnectedAtMs = undefined;
+      existing.disconnectedAtTick = undefined;
+      this.lastInputTickBySession.set(client.sessionId, this.tickCount);
 
       client.userData = {
         wallet,
@@ -245,6 +247,7 @@ export class GameRoom extends Room<GameState> {
       spawnMass,
     });
     sim.depositId = options.depositId as `0x${string}` | undefined;
+    this.lastInputTickBySession.set(client.sessionId, this.tickCount);
 
     console.log(`Player ${client.sessionId} spawned with mass ${spawnMass}`);
     this.sendInit(client);
@@ -253,7 +256,7 @@ export class GameRoom extends Room<GameState> {
   /**
    * Find a player by wallet address
    */
-  private getPlayerByWallet(wallet: string): PlayerSim | null {
+  private getPlayerByWallet(wallet: string): PlayerState | null {
     const w = wallet.toLowerCase() as `0x${string}`;
     return this.engine.findPlayerByWallet(w) ?? null;
   }
@@ -296,7 +299,8 @@ export class GameRoom extends Room<GameState> {
       return;
     }
 
-    sim.disconnectedAtMs = Date.now();
+    this.engine.markDisconnected(client.sessionId, this.tickCount);
+    this.engine.setInput(client.sessionId, { w: false, a: false, s: false, d: false, shoot: false, dash: false, exit: false });
     console.log(`Client ${client.sessionId} disconnected, entity kept alive for reconnect`);
   }
 
@@ -305,9 +309,8 @@ export class GameRoom extends Room<GameState> {
    */
   private removePlayer(sessionId: string) {
     this.engine.removePlayer(sessionId);
-    this.exitHoldStartedAtBySession.delete(sessionId);
     this.prevVisibleIdsBySession.delete(sessionId);
-    this.prevKeyStateBySession.delete(sessionId);
+    this.lastInputTickBySession.delete(sessionId);
   }
 
   /**
@@ -323,45 +326,26 @@ export class GameRoom extends Room<GameState> {
   private handleInput(client: Client, message: InputMessage) {
     const sim = this.engine.getPlayer(client.sessionId);
     if (!sim || !sim.alive) return;
-
-    const prev = this.prevKeyStateBySession.get(client.sessionId) ?? { space: false, w: false, q: false };
-    const next = { space: !!message.space, w: !!message.w, q: !!message.q };
-    this.prevKeyStateBySession.set(client.sessionId, next);
-
-    // We interpret message.x/message.y as world-space mouse coordinates.
-    const mouseX = Number(message.x) || 0;
-    const mouseY = Number(message.y) || 0;
-
-    const splitPressed = next.space && !prev.space;
-    const ejectPressed = next.w && !prev.w;
+    const aimX = Number(message.aimX) || 0;
+    const aimY = Number(message.aimY) || 0;
+    // POC parity: Clamp aim within max border radius (circular world centered at 0,0)
+    const maxR = SIM_CONFIG.border.worldRadiusMax;
+    const clampedAimX = Math.max(-maxR, Math.min(maxR, aimX));
+    const clampedAimY = Math.max(-maxR, Math.min(maxR, aimY));
 
     this.engine.setInput(client.sessionId, {
-      mouseX,
-      mouseY,
-      splitPressed,
-      ejectPressed,
+      w: !!message.w,
+      a: !!message.a,
+      s: !!message.s,
+      d: !!message.d,
+      aimX: clampedAimX,
+      aimY: clampedAimY,
+      shoot: !!message.shoot,
+      dash: !!message.dash,
+      exit: !!message.exit,
     });
 
-    // Exit-hold overlay (economic) is tracked outside the engine
-    if (next.q && !prev.q) {
-      this.exitHoldStartedAtBySession.set(client.sessionId, Date.now());
-    } else if (!next.q && prev.q) {
-      this.exitHoldStartedAtBySession.delete(client.sessionId);
-    }
-  }
-
-  /**
-   * Start the exit hold countdown
-   */
-  private startExit(sessionId: string) {
-    this.exitHoldStartedAtBySession.set(sessionId, Date.now());
-  }
-
-  /**
-   * Cancel the exit hold
-   */
-  private cancelExit(sessionId: string) {
-    this.exitHoldStartedAtBySession.delete(sessionId);
+    this.lastInputTickBySession.set(client.sessionId, this.tickCount);
   }
 
   /**
@@ -371,13 +355,16 @@ export class GameRoom extends Room<GameState> {
    * 1. Transfers from server:world to user:pending:exit:<wallet>
    * 2. Signs and returns the exit ticket
    */
-  private async completeExit(client: Client) {
-    const sim = this.engine.getPlayer(client.sessionId);
-    if (!sim || !sim.alive) return;
+  private async completeExit(sessionId: string) {
+    const sim = this.engine.getPlayer(sessionId);
+    if (!sim) return;
+    const client = this.clients.find((c) => c.sessionId === sessionId);
+    if (!client) return;
 
     try {
       const userData = client.userData as PlayerUserData;
-      const sessionId = generateSessionId(userData.wallet, ++this.sessionNonce);
+      const exitAttemptId = sim.exitAttemptId || ++this.sessionNonce;
+      const ticketSessionId = generateSessionId(userData.wallet, exitAttemptId);
 
       const totalMass = this.engine.getPlayerTotalMass(client.sessionId);
       const payoutWei = massToPayoutAmount(totalMass, this.massPerEth);
@@ -387,14 +374,13 @@ export class GameRoom extends Room<GameState> {
         serverId,
         userData.wallet,
         payoutWei,
-        sessionId,
+        ticketSessionId,
         signingConfig,
-        `exit:${sessionId}`
+        `exit:${client.sessionId}:${exitAttemptId}`
       );
 
       if (!ticket) {
         client.send("exitError", { message: "Server temporarily out of funds, please try again." });
-        this.cancelExit(client.sessionId);
         return;
       }
 
@@ -411,12 +397,10 @@ export class GameRoom extends Room<GameState> {
       client.send("exitTicket", serializedTicket);
       console.log(`Player ${client.sessionId} exited with payout ${payoutWei.toString()}`);
 
-      sim.alive = false;
       this.removePlayer(client.sessionId);
     } catch (error) {
       console.error(`[GameRoom] completeExit failed for ${client.sessionId}:`, error);
       client.send("exitError", { message: "Exit failed, please try again." });
-      this.cancelExit(client.sessionId);
     }
   }
 
@@ -429,41 +413,39 @@ export class GameRoom extends Room<GameState> {
    */
   private update(_deltaTime: number) {
     this.tickCount++;
-    this.spawnTickCount++;
+    // Stale input handling (clear holds)
+    for (const [sessionId, lastTick] of this.lastInputTickBySession.entries()) {
+      if (this.tickCount - lastTick > SIM_CONFIG.inputStaleTicks) {
+        this.engine.setInput(sessionId, { w: false, a: false, s: false, d: false, shoot: false, dash: false, exit: false });
+      }
+    }
 
     const result = this.engine.step();
 
-    // Recycle: decay + ejected-fed-to-virus return value to pellet budget
     let recycledMass = 0;
+    let pelletMass = 0;
+    const pelletIds: number[] = [];
+
     for (const e of result.events) {
-      if (e.type === "massDecayed" || e.type === "ejectedFedVirus") {
+      if (e.type === "recycleMass") {
         recycledMass += e.mass;
+      } else if (e.type === "pelletSpawned") {
+        pelletMass += e.mass;
+        pelletIds.push(e.id);
+      } else if (e.type === "playerExited") {
+        void this.completeExit(e.sessionId);
+      } else if (e.type === "playerDied") {
+        this.removePlayer(e.sessionId);
       }
     }
+
     if (recycledMass > 0) {
       const wei = massToPayoutAmount(recycledMass, this.massPerEth);
-      // Move value from world pool back into pellet budget (recycling).
-      void ledger.transfer(serverId, "server:world", "server:budget", wei);
+      void ledger.transfer(serverId, "server:world", "server:budget", wei, `recycle:${this.roomId}:${this.tickCount}`);
     }
 
-    // Spawn schedule (every 20 ticks): budgeted pellets + virus floor
-    if (this.spawnTickCount >= FFA_CONFIG.spawnIntervalTicks) {
-      this.spawnTickCount = 0;
-      if (!this.spawnTaskInFlight) {
-        this.spawnTaskInFlight = true;
-        void this.spawnTickTasks().finally(() => {
-          this.spawnTaskInFlight = false;
-        });
-      }
-    }
-
-    // Exit-hold completion
-    for (const [sessionId, startedAt] of [...this.exitHoldStartedAtBySession.entries()]) {
-      const elapsed = Date.now() - startedAt;
-      if (elapsed < this.exitHoldMs) continue;
-      const client = this.clients.find((c) => c.sessionId === sessionId);
-      if (client) void this.completeExit(client);
-      this.exitHoldStartedAtBySession.delete(sessionId);
+    if (pelletMass > 0) {
+      void this.handlePelletTransfers(pelletMass, pelletIds);
     }
 
     // Visibility deltas
@@ -477,58 +459,32 @@ export class GameRoom extends Room<GameState> {
     }
   }
 
-  private async spawnTickTasks() {
-    // Virus floor/cap logic (no economic gating)
-    this.engine.ensureVirusMin();
-
-    // Pellet spawning is gated by budget
-    const currentFood = this.engine.foodNodeIds.length;
-    const toSpawn = Math.min(FFA_CONFIG.foodSpawnAmount, FFA_CONFIG.foodMaxAmount - currentFood);
-
-    for (let i = 0; i < toSpawn; i++) {
-      const mass =
-        FFA_CONFIG.foodMinMass +
-        Math.floor(Math.random() * FFA_CONFIG.foodMaxMass);
-
-      const costWei = massToPayoutAmount(mass, this.massPerEth);
-      // Pellets are funded by moving budget -> world.
-      const ok = await ledger.transfer(serverId, "server:budget", "server:world", costWei);
-      if (!ok) break;
-
-      this.engine.spawnRandomFood(mass);
+  private async handlePelletTransfers(totalMass: number, pelletIds: number[]) {
+    const costWei = massToPayoutAmount(totalMass, this.massPerEth);
+    const ok = await ledger.transfer(serverId, "server:budget", "server:world", costWei, `pellet:${this.roomId}:${this.tickCount}`);
+    if (!ok) {
+      for (const id of pelletIds) {
+        this.engine.pickups.delete(id);
+      }
     }
   }
 
-  private buildViewBox(sim: PlayerSim) {
-    const len = sim.cellIds.length;
-    if (len <= 0) return null;
-
-    let totalSize = 1.0;
-    let cx = 0;
-    let cy = 0;
-
-    for (const id of sim.cellIds) {
-      const node = this.engine.nodes.get(id);
-      if (!node || node.kind !== "player") continue;
-      totalSize += massToRadius(node.mass);
-      cx += node.x;
-      cy += node.y;
-    }
-
-    cx = (cx / len) >> 0;
-    cy = (cy / len) >> 0;
-
-    const factor = Math.pow(Math.min(64.0 / totalSize, 1), 0.4);
-    const sightRangeX = FFA_CONFIG.viewBaseX / factor;
-    const sightRangeY = FFA_CONFIG.viewBaseY / factor;
+  private buildViewBox(sim: PlayerState) {
+    const cx = sim.x;
+    const cy = sim.y;
+    const sizeFactor = Math.min(1.4, Math.max(0.6, SIM_CONFIG.radiusAtSpawn / Math.max(1, sim.radius)));
+    const radius = Math.max(
+      SIM_CONFIG.viewMinRadius,
+      Math.min(SIM_CONFIG.viewMaxRadius, SIM_CONFIG.viewBaseRadius * sizeFactor),
+    );
 
     return {
       centerX: cx,
       centerY: cy,
-      topY: cy - sightRangeY,
-      bottomY: cy + sightRangeY,
-      leftX: cx - sightRangeX,
-      rightX: cx + sightRangeX,
+      topY: cy - radius,
+      bottomY: cy + radius,
+      leftX: cx - radius,
+      rightX: cx + radius,
     };
   }
 
@@ -547,16 +503,112 @@ export class GameRoom extends Room<GameState> {
     if (!box) return;
 
     const nowVisible = new Set<number>();
-    const nodes: Array<Record<string, unknown>> = [];
+    const candidates: WorldNode[] = [];
+    const queryBox = {
+      leftX: box.leftX - 240,
+      rightX: box.rightX + 240,
+      topY: box.topY - 240,
+      bottomY: box.bottomY + 240,
+    };
+    const nodes = this.engine.getWorldNodesInBox(queryBox);
+    const pickupInterestRadius = SIM_CONFIG.lod.pickupInterestRadius;
+    const minPickupMass = SIM_CONFIG.lod.minPickupMassForDelta;
+    const pickupInterestRadiusSq = pickupInterestRadius * pickupInterestRadius;
 
-    for (const node of this.engine.nodes.values()) {
-      if (node.y > box.bottomY) continue;
-      if (node.y < box.topY) continue;
-      if (node.x > box.rightX) continue;
-      if (node.x < box.leftX) continue;
+    for (const node of nodes) {
+      const margin = node.kind === "bullet" ? 200 : 0;
+      if (node.y > box.bottomY + margin) continue;
+      if (node.y < box.topY - margin) continue;
+      if (node.x > box.rightX + margin) continue;
+      if (node.x < box.leftX - margin) continue;
+      if ((node.kind === "pellet" || node.kind === "spill") && node.mass < minPickupMass) {
+        const dx = node.x - sim.x;
+        const dy = node.y - sim.y;
+        if (dx * dx + dy * dy > pickupInterestRadiusSq) continue;
+      }
+      candidates.push(node);
+    }
 
+    // Optional spill clustering for far range
+    const clusterDtos: NodeDto[] = [];
+    if (candidates.length > SIM_CONFIG.lod.maxNodesPerDelta) {
+      const cellSize = SIM_CONFIG.lod.clusterCellSize;
+      const clusterMinCount = SIM_CONFIG.lod.clusterMinCount;
+      const clusterBase = 1_000_000_000;
+      const offset = 32768;
+
+      const kept: WorldNode[] = [];
+      const buckets = new Map<
+        string,
+        { nodes: WorldNode[]; mass: number; count: number; sumX: number; sumY: number; id: number }
+      >();
+
+      for (const node of candidates) {
+        if (node.kind === "pellet" || node.kind === "spill") {
+          const dx = node.x - sim.x;
+          const dy = node.y - sim.y;
+          if (dx * dx + dy * dy > pickupInterestRadiusSq) {
+            const cx = Math.floor(node.x / cellSize);
+            const cy = Math.floor(node.y / cellSize);
+            const key = `${cx},${cy}`;
+            let bucket = buckets.get(key);
+            if (!bucket) {
+              const id = clusterBase + (cx + offset) * 65536 + (cy + offset);
+              bucket = { nodes: [], mass: 0, count: 0, sumX: 0, sumY: 0, id };
+              buckets.set(key, bucket);
+            }
+            bucket.nodes.push(node);
+            bucket.mass += node.mass ?? 0;
+            bucket.count += 1;
+            bucket.sumX += node.x;
+            bucket.sumY += node.y;
+            continue;
+          }
+        }
+        kept.push(node);
+      }
+
+      for (const bucket of buckets.values()) {
+        if (bucket.count >= clusterMinCount) {
+          const x = bucket.sumX / bucket.count;
+          const y = bucket.sumY / bucket.count;
+          const radius = Math.max(20, Math.min(100, Math.sqrt(bucket.mass)));
+          clusterDtos.push({
+            kind: "spillCluster",
+            id: bucket.id,
+            x,
+            y,
+            radius,
+            mass: bucket.mass,
+            count: bucket.count,
+            flags: 0,
+          });
+          nowVisible.add(bucket.id);
+        } else {
+          kept.push(...bucket.nodes);
+        }
+      }
+      candidates.length = 0;
+      candidates.push(...kept);
+    }
+
+    // LOD cap (server-side bandwidth control)
+    if (candidates.length > SIM_CONFIG.lod.maxNodesPerDelta) {
+      const priority = (kind: WorldNode["kind"]) =>
+        kind === "player" ? 0 : kind === "bullet" ? 1 : kind === "spill" ? 2 : kind === "pellet" ? 3 : 4;
+      candidates.sort((a, b) => {
+        const pa = priority(a.kind);
+        const pb = priority(b.kind);
+        if (pa !== pb) return pa - pb;
+        return a.id - b.id;
+      });
+      candidates.length = SIM_CONFIG.lod.maxNodesPerDelta;
+    }
+
+    const dtos: NodeDto[] = [...clusterDtos];
+    for (const node of candidates) {
       nowVisible.add(node.id);
-      nodes.push(this.nodeToDto(node));
+      dtos.push(this.nodeToDto(node));
     }
 
     const prev = this.prevVisibleIdsBySession.get(client.sessionId) ?? new Set<number>();
@@ -567,55 +619,99 @@ export class GameRoom extends Room<GameState> {
 
     this.prevVisibleIdsBySession.set(client.sessionId, nowVisible);
 
-    client.send("world:delta", {
+    const payload: WorldDeltaDto = {
       tick: this.tickCount,
-      nodes,
+      nodes: dtos,
       removedIds,
-      ownedIds: [...sim.cellIds],
-    });
-  }
-
-  private nodeToDto(node: WorldNode): Record<string, unknown> {
-    const base: Record<string, unknown> = {
-      id: node.id,
-      kind: node.kind,
-      x: node.x,
-      y: node.y,
+      ownedIds: [sim.id],
+      // Dynamic border state (POC parity)
+      border: {
+        radius: this.engine.world.borderRadius,
+        targetRadius: this.engine.world.borderTargetRadius,
+        velocity: this.engine.world.borderVelocity,
+      },
     };
 
+    client.send("world:delta", payload);
+  }
+
+  private nodeToDto(node: WorldNode): NodeDto {
     if (node.kind === "player") {
-      const owner = this.engine.getPlayer(node.ownerSessionId);
       return {
-        ...base,
-        mass: node.mass,
-        radius: massToRadius(node.mass),
-        color: node.color,
+        kind: "player",
+        id: node.id,
         ownerSessionId: node.ownerSessionId,
-        displayName: owner?.displayName,
+        displayName: node.displayName,
+        x: node.x,
+        y: node.y,
+        radius: node.radius,
+        mass: node.mass,
+        spawnMass: node.spawnMass,
+        color: node.color,
+        flags: node.flags,
+        exitProgress: node.exitProgress,
+        vx: node.vx,
+        vy: node.vy,
+        aimX: node.aimX,
+        aimY: node.aimY,
+        dashChargeRatio: node.dashChargeRatio,
+        shootChargeRatio: node.shootChargeRatio,
+        dashCooldownTicks: node.dashCooldownTicks,
+        dashActiveTicks: node.dashActiveTicks,
+        stunTicks: node.stunTicks,
+        slowTicks: node.slowTicks,
+        shootRecoveryTicks: node.shootRecoveryTicks,
+        exitCombatTagTicks: node.exitCombatTagTicks,
+        hitFlashTicks: node.hitFlashTicks,
       };
     }
-    if (node.kind === "food") {
-      return { ...base, mass: node.mass, radius: massToRadius(node.mass), color: node.color };
+    if (node.kind === "bullet") {
+      return { kind: "bullet", id: node.id, x: node.x, y: node.y, radius: node.radius, flags: node.flags };
     }
-    if (node.kind === "ejected") {
-      return { ...base, mass: node.mass, radius: massToRadius(node.mass), color: node.color };
+    if (node.kind === "pellet") {
+      return { kind: "pellet", id: node.id, x: node.x, y: node.y, radius: node.radius, mass: node.mass, flags: node.flags };
     }
-    return { ...base, radius: massToRadius(node.sizeMass) };
+    if (node.kind === "spill") {
+      return {
+        kind: "spill",
+        id: node.id,
+        x: node.x,
+        y: node.y,
+        radius: node.radius,
+        mass: node.mass,
+        attackerSessionId: node.attackerSessionId,
+        victimSessionId: node.victimSessionId,
+        unlockTick: node.unlockTick,
+        flags: node.flags,
+      };
+    }
+    return { kind: "obstacle", id: node.id, x: node.x, y: node.y, radius: node.radius, flags: node.flags };
   }
 
   private sendInit(client: Client) {
-    client.send("world:init", {
+    const payload: WorldInitDto = {
+      protocolVersion: PROTOCOL_VERSION,
       serverId: config.serverId,
-      tickMs: FFA_CONFIG.tickMs,
+      tickMs: SIM_CONFIG.tickMs,
+      // Legacy rectangular bounds (derived from max border)
       world: {
-        left: FFA_CONFIG.borderLeft,
-        right: FFA_CONFIG.borderRight,
-        top: FFA_CONFIG.borderTop,
-        bottom: FFA_CONFIG.borderBottom,
+        left: -SIM_CONFIG.border.worldRadiusMax,
+        right: SIM_CONFIG.border.worldRadiusMax,
+        top: -SIM_CONFIG.border.worldRadiusMax,
+        bottom: SIM_CONFIG.border.worldRadiusMax,
+      },
+      // Dynamic circular border (POC parity)
+      border: {
+        radius: this.engine.world.borderRadius,
+        targetRadius: this.engine.world.borderTargetRadius,
+        maxRadius: SIM_CONFIG.border.worldRadiusMax,
+        minRadius: SIM_CONFIG.border.worldRadiusMin,
       },
       massPerEth: this.massPerEth,
       exitHoldMs: this.exitHoldMs,
-    });
+      massScale: SIM_CONFIG.massScale,
+    };
+    client.send("world:init", payload);
   }
 
   private async refreshBalancesAndMetadata() {
@@ -626,6 +722,15 @@ export class GameRoom extends Room<GameState> {
     } catch (error) {
       console.warn("[GameRoom] Failed to refresh balances:", error);
     }
+  }
+
+  private hashSeed(input: string): number {
+    let hash = 2166136261;
+    for (let i = 0; i < input.length; i++) {
+      hash ^= input.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return hash >>> 0;
   }
 
   private refreshMetadata() {

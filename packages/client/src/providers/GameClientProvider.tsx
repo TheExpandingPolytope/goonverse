@@ -25,6 +25,8 @@ type DeltaWorldSnapshot = {
   // Visible nodes only (per-client)
   nodes: Map<number, unknown>
   ownedIds: number[]
+  // Dynamic border state (POC parity)
+  border?: { radius: number; targetRadius: number; velocity: number }
 }
 
 /** Derive WebSocket URL from HTTP origin */
@@ -214,6 +216,16 @@ export const GameClientProvider = ({ children }: PropsWithChildren) => {
 
           const owned: unknown[] = Array.isArray(d?.ownedIds) ? d.ownedIds : []
           deltaSnapshot.ownedIds = owned.filter((x): x is number => typeof x === 'number')
+
+          // Extract border state (POC parity)
+          if (d?.border && typeof d.border === 'object') {
+            deltaSnapshot.border = {
+              radius: typeof d.border.radius === 'number' ? d.border.radius : 700,
+              targetRadius: typeof d.border.targetRadius === 'number' ? d.border.targetRadius : 700,
+              velocity: typeof d.border.velocity === 'number' ? d.border.velocity : 0,
+            }
+          }
+
           // Keep the delta snapshot as the canonical render source.
           latestStateRef.current = deltaSnapshot
         })

@@ -97,6 +97,7 @@ export class GameState extends Schema {
   @type("number") tickRate: number = 20;
   @type("number") exitHoldMs: number = 3000;
   @type("number") massPerEth: number = 100;
+  @type("number") massScale: number = 10_000;
   
   // Players
   @type({ map: Player }) players = new MapSchema<Player>();
@@ -119,17 +120,28 @@ export class GameState extends Schema {
  * Input message from client
  * 
  * Controls:
- * - x, y: Target position (cursor/touch)
- * - q: Hold to exit (cash out)
- * - space: Split
- * - w: Eject mass
+ * - w/a/s/d: Movement holds
+ * - aimX/aimY: Aim target in world space
+ * - shoot/dash/exit: action holds
  */
 export interface InputMessage {
-  x: number;       // Target X position
-  y: number;       // Target Y position
-  q: boolean;      // Exit trigger (hold to cash out)
-  space: boolean;  // Split trigger
-  w: boolean;      // Eject mass trigger
+  // Movement intent
+  w: boolean;
+  a: boolean;
+  s: boolean;
+  d: boolean;
+
+  // Aim target in world space
+  aimX: number;
+  aimY: number;
+
+  // Holds
+  shoot: boolean; // LMB
+  dash: boolean;  // RMB or Space
+  exit: boolean;  // Q
+
+  // Optional: future reconciliation
+  clientTick?: number;
 }
 
 /**

@@ -274,7 +274,12 @@ export async function getServer(serverId: string) {
 
     return data.servers ?? null;
   } catch (error) {
-    console.error("Failed to get server:", error);
+    const cause = (error as { cause?: { code?: string } }).cause;
+    if (cause?.code === "ECONNREFUSED") {
+      console.warn(`[ponder] Indexer unavailable at ${config.ponderUrl} - server will use defaults`);
+    } else {
+      console.error("[ponder] Failed to get server config:", error);
+    }
     return null;
   }
 }

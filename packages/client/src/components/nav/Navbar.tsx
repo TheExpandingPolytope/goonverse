@@ -1,7 +1,7 @@
 import { useAuth } from '@/hooks/useAuth'
 import { useWallet } from '@/hooks/useWallet'
 import { useEthUsdPrice } from '@/hooks/useEthUsdPrice'
-import { ethToUsd, formatUsd } from '@/lib/formatter'
+import { ethToUsd, formatEth, formatUsd } from '@/lib/formatter'
 import { ArrowDownLeft, ArrowUpRight, Check, ChevronDown, Copy, Share2, User } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 
@@ -13,6 +13,7 @@ export const Navbar = () => {
   const walletUsd = ethToUsd(ethBalance, ethUsd)
   const handle = primaryHandle ?? (activeAddress ? `${activeAddress.slice(0, 6)}...${activeAddress.slice(-4)}` : 'anon')
   const walletUsdLabel = useMemo(() => formatUsd(walletUsd, true), [walletUsd])
+  const walletEthLabel = useMemo(() => formatEth(ethBalance), [ethBalance])
 
   const [inviteOpen, setInviteOpen] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
@@ -88,7 +89,10 @@ export const Navbar = () => {
                 <span className="hidden sm:block font-semibold text-sm text-gray-300 max-w-[80px] truncate">
                   {handle}
                 </span>
-                <span className="text-[15px] font-bold text-[#4ade80] text-glow-green-subtle">{walletUsdLabel}</span>
+                <div className="flex flex-col items-end leading-tight">
+                  <span className="text-[15px] font-bold text-[#4ade80] text-glow-green-subtle">{walletUsdLabel}</span>
+                  <span className="text-[11px] text-gray-500 font-medium">{walletEthLabel}</span>
+                </div>
 
                 <div className="hidden sm:flex items-center gap-1.5 ml-1">
                   <button

@@ -52,7 +52,7 @@ export const World = () => {
     return () => {
       cleanupRenderer()
     }
-  }, [])
+  }, [isOverlayVisible])
 
   useEffect(() => {
     // Low power while overlay is shown.
@@ -73,7 +73,7 @@ export const World = () => {
       setHud(vm?.hud ?? null)
       return vm
     }
-  }, [isOverlayVisible, mockGetViewModel, adapter, setHud])
+  }, [isOverlayVisible, mockGetViewModel, adapter, setHud, phase])
 
   useEffect(() => {
     const canvas = canvasRef.current
