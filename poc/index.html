@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Ballistic Capital - Tactical Dash</title>
+    <link href="https://fonts.googleapis.com/css2?family=Rubik:wght@400;700;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+
+    <div id="ui-layer">
+        <div id="damage-flash"></div>
+        <div id="status-msg">SYSTEM OVERHEAT</div>
+        <div id="cooldown-bar-container"><div id="cooldown-bar"></div></div>
+        
+        <div id="audio-hint">Click to Enable Audio</div>
+        
+        <div id="leaderboard">
+            <h3 id="lb-title">Leaderboard</h3>
+            <div id="lb-content"></div>
+        </div>
+        <div id="event-feed"></div>
+        <div id="transaction-log"></div>
+        
+        <div id="hud-container">
+            <div id="hud-main">
+                <span id="hud-balance">$<span id="player-cash">20.00</span></span>
+                <span id="pnl-badge" class="badge-neutral">(+0%)</span>
+            </div>
+            <div id="balance-delta"></div>
+        </div>
+
+        <div id="controls-hint">
+            <span style="color:#fff">WASD</span> Move<br>
+            <span style="color:#fff">Mouse</span> Aim<br>
+            <span style="color:#4ade80">LMB</span> Fire (Hold for Power)<br>
+            <span style="color:#f43f5e">RMB/SPACE</span> Charge Dash<br>
+            <span style="color:#60a5fa">Q</span> Hold to Exit (Cash Out)<br>
+            <span style="color:#aaa; font-style:italic">Dash Stuns. Shoot Stunned Targets.</span>
+        </div>
+    </div>
+
+    <div id="game-over">
+        <h1 id="go-title">LIQUIDATED</h1>
+        <p id="go-message" style="color: #aaa;">Your balance reached $0.00.</p>
+        <button id="restart-btn">Re-Invest ($20.00)</button>
+    </div>
+
+    <div id="lobby">
+        <div id="lobby-content">
+            <h1>BALLISTIC CAPITAL</h1>
+            <p class="tagline">Tactical Dash Arena</p>
+            
+            <div id="wallet-display">
+                <span class="wallet-label">WALLET BALANCE</span>
+                <span id="wallet-balance" class="wallet-amount">$100.00</span>
+            </div>
+            
+            <div id="entry-info">
+                <span>Entry Fee:</span>
+                <span id="entry-fee">$20.00</span>
+            </div>
+            
+            <button id="enter-btn">ENTER GAME</button>
+            
+            <p id="insufficient-funds" style="display: none; color: #ff5555;">
+                Insufficient funds! Need $20.00 to enter.
+            </p>
+            
+            <button id="reset-wallet-btn">Reset Wallet (Debug)</button>
+        </div>
+    </div>
+
+    <div id="exit-success" style="display: none;">
+        <h1 style="color: #4ade80;">CASHED OUT!</h1>
+        <p id="exit-amount" style="color: #fff; font-size: 48px;">+$25.00</p>
+        <p style="color: #aaa;">Added to wallet</p>
+        <button id="exit-continue-btn">Continue</button>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+</body>
+</html>
